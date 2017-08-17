@@ -1,0 +1,120 @@
+C++11 为多线程引入的除了统一的 API 之外还有用于修饰对象声明和定义的关键字 `thread_local`, 指出一个对象以线程本地存储 (thread local storage) 方式初始化并被各线程独立使用.
+
+比如下面的例子, 在全局空间中声明一个 `thread_local` 修饰的对象并在两个不同的线程中使用它
+
+```
+thread_local int local_j = 0;
+
+void thread_exec(int i)
+{
+    for (int j = 0; j < 5; ++j) {
+        // 累加并输出全局空间中的 local_j
+        ::local_j += j;
+        std::cout << "At thread #" + std::to_string(i) +
+                     " local_j=" + std::to_string(local_j) + "\n";
+    }
+}
+
+int main(int argc, char** argv)
+{
+    std::thread t0(thread_exec, 0);
+    std::thread t1(thread_exec, 1);
+    t0.join();
+    t1.join();
+    return 0;
+}
+```
+
+可能的输出为
+
+:::
+At thread #1 local_j=0
+At thread #1 local_j=1
+At thread #1 local_j=3
+At thread #1 local_j=6
+At thread #0 local_j=0
+At thread #0 local_j=1
+At thread #0 local_j=3
+At thread #0 local_j=6
+At thread #0 local_j=10
+At thread #1 local_j=10
+:::
+
+可以看出两个线程访问的 `local_j` 是隔离的, 这也就是 `thread_local` 关键字的作用, 让所定义的变量在每个线程中都是独立副本.
+
+除了在全局空间中定义线程本地存储变量, `thread_local` 还可以被用在名字空间中, 函数体中和类体中. 其中出现在函数体中的线程本地存储对象隐式带有 `static` 修饰, 而出现在类体中的则需要用户显式地给出 `static`, 否则会报错.
+
+比如, 在上述例子中扩充以下内容
+
+```
+struct A {
+    void print() { std::cout << "A::print\n"; }
+    ~A() { std::cout << "~A\n"; }
+
+    // 在类体中使用 thread_local 声明, 必须同时使用 static 将其定义为非实例成员
+    static thread_local A a;
+};
+
+void thread_exec(int i)
+{
+    // ...
+    // 增加下面一句
+    A::a.print();
+}
+
+int main(int argc, char** argv)
+{
+    std::thread t0(thread_exec, 0);
+    std::thread t1(thread_exec, 1);
+    t0.join();
+    t1.join();
+    return 0;
+}
+
+// 定义处也须加上 thread_local 关键字, 但不要加 static
+thread_local A A::a;
+```
+
+可能的输出为
+
+:::
+At thread #1 local_j=0
+At thread #1 local_j=1
+At thread #0 local_j=0
+At thread #0 local_j=1
+At thread #1 local_j=3
+At thread #0 local_j=3
+At thread #1 local_j=6
+At thread #0 local_j=6
+At thread #1 local_j=10
+A::print
+~A
+At thread #0 local_j=10
+A::print
+~A
+:::
+
+从这里还看出来, 当线程执行结束后, 线程本地存储对象会自动析构. 不过, 这里只析构了 2 个 `A` 对象, 但包含主线程的话, 一共有 3 个线程, 是主线程被 `thread_local` 排除在外了吗? 当然并不是, 主线程中也可以使用本地存储对象. 如将 `main` 函数改成
+
+```
+int main()
+{
+    std::thread t0(thread_exec, 0);
+    std::thread t1(thread_exec, 1);
+    t0.join();
+    t1.join();
+    A::a.print();   // 使用 A::a
+    return 0;
+}
+```
+
+那么输出的内容会增加两行
+
+```
+A::print
+~A
+```
+
+结果被析构掉的 `A` 实例就有了 3 个. 也就是说, 如果主线程中根本不使用 `A::a`, 那么编译器可以不构造这个本地存储对象.
+
+实际上, 在标准中也没有明确规定线程本地存储对象的构造时机. 这一点跟函数本地存储的 `static` 对象很相似: 只要线程首次使用这个对象时, 该对象被构造完毕就可以了, 且如果构造则配套地给出析构函数. 至于具体的规则就由编译器自己去实现. 因此在主线程完全没有使用 `A::a` 时, 编译器也可以选择根本不构造这一对象.

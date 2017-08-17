@@ -1,0 +1,69 @@
+C++ 受到诟病的一点是每个类型都会有一个复制构造函数, 即使用户不编写之, 编译器也会合成一个. 而某些类型, 比如文件流 `fstream` 又是不可复制的. 在既有标准中, 用户想到各种方法来应对这一编译器 "特性", 典型的做法是将复制构造函数声明为 `private` 访问限制的, 且只声明而不实现它. 如
+
+```
+struct NonCopyable {
+    NonCopyable() {}
+private:
+    NonCopyable(NonCopyable const&); // 声明为 private, 没有实现
+};
+
+int main()
+{
+    NonCopyable n;
+    NonCopyable m(n);                // 编译错误
+    return 0;
+}
+
+// 报错信息为: 此类型的复制构造函数为私有
+// error: ‘NonCopyable::NonCopyable(const NonCopyable&)’ is private
+```
+
+这种封印的手法的问题一是报错词不达意, 二是偶尔在类的内部出现误用时 (类的内部可是能够使用 `private` 复制构造函数的), 它将导致链接错误而非编译错误, 而链接错误往往又是无法看到源代码行号的.
+
+C++11 标准中打算收拾掉这一乱象, 给出一个简单的方案让用户可以明显地指出某个函数不需要了. 如
+
+```!
+struct NonCopyable {
+    NonCopyable() {}
+    NonCopyable(NonCopyable const&) = delete;
+};
+
+NonCopyable n;
+NonCopyable m(n); // 编译失败, 报错为复制构造函数被删除了
+                  // use of deleted function ‘NonCopyable::NonCopyable(const NonCopyable&)’
+```
+
+也就是在需要删除的函数后加上一个小尾巴 `= delete`, 这样此类型就无法复制构造了. 当然这只是在语法上限制了复制行为, 有关无法复制的类型更详细的特性, 本书将在 "移动语义" 一章将进行讨论.
+
+这一机制除了可以用来禁止合成复制构造函数之外还可以用来取消掉由基类继承而来的函数, 或防止类型转化重载, 如
+
+```
+struct Base {
+    void print()
+    {
+        std::cout << "Base" << std::endl;
+    }
+};
+
+struct Inherit: Base {
+    // 在子类中声明父类中出现过的 print() 函数
+    // 并标记为 delete, 那么无法从子类对象调用此函数
+    void print() = delete;
+};
+
+void f(int x) {}
+void f(char ch) = delete; // 标记 char 为参数的重载为 delete
+
+int main()
+{
+    Base b;
+    b.print();
+    Inherit i;
+    i.print();  // 编译错误: print 在子类中被标记为 delete 了
+
+    f(10);      // 正确: 匹配参数为 int 的重载
+    f('c');     // 编译错误: 匹配为参数为 char, 但被删除掉的重载
+                // 如果没有 f(char) 的声明, 参数将被扩宽为 int 匹配 f(int) 的重载
+    return 0;
+}
+```

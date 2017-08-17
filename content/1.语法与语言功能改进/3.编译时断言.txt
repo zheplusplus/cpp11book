@@ -1,0 +1,11 @@
+在 C++03 标准中, 另一由于没有编译器支持而实现得很繁琐的简单需求是编译时断言, 在 C++11 中则直接将关键字 `static_assert` (C 语言中为 `_Static_assert`) 加入语言本身, 由编译器来检查某个编译时条件是否满足. 其语法如下
+
+```
+// 在编译时常量 BOOL_CONSTANT 为 false 时给出一个编译错误, 错误信息为 ERROR_MESSAGE
+static_assert(BOOL_CONSTANT, ERROR_MESSAGE);
+
+// 例
+static_assert(true, "this is ok");
+static_assert(false, "cause a compile error"); // 此行会产生编译错误
+static_assert(sizeof(int) == 4, "int is not 4 bytes");
+```

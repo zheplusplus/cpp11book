@@ -1,0 +1,421 @@
+上一节谈到了 STL 中具有代表性的容器 `vector` 实现移动构造函数的一种方式, 实质上是通过类似 `swap` 的机制将构造来源容器的内容交换给新构造的容器. 如果读者回忆一下, 可能立即会想到在 C++11 标准出台之前有一个模板类型就具有这样类似的行为, 它就是 `auto_ptr`.
+
+这个来自上世纪的指针模板类型有一个诡异特性就是它在看起来被复制的时候实际上会发生移动, 如以下这段示例
+
+```
+std::auto_ptr<int> a(new int(91));
+std::auto_ptr<int> b(NULL);
+
+std::cout << (b.get() == NULL) << std::endl; // 1
+std::cout << *a << std::endl;                // 91
+
+b = a;
+
+std::cout << *b << std::endl;                // 91
+std::cout << (a.get() == NULL) << std::endl; // 1 : "赋值" 给 b 之后, a 就成了空指针
+```
+
+这个特性的初衷就是为了让一份资源同一时间只有一个, 因此当使用一个 `auto_ptr` 对象去构造另一个 `auto_ptr` 对象, 或像上面代码里这样使用赋值运算符时, 作为参数, 也就是指针原来的持有者会被设置为空值.
+
+如果这样能够工作那当然是最好, 然而不要孤立地看这一小段代码, 若一个场景需要不定个数的 `auto_ptr`, 编写代码时可能会考虑使用一个 STL 容器如 `vector` 存储它们, 但即使只写这么三行代码
+
+```
+std::vector<std::auto_ptr<int> > x;
+std::auto_ptr<int> e(new int(91));
+x.push_back(e);
+```
+
+编译器便会报错: `vector` 在构造元素时无法将 `T const&` 转换成 `T&` 其中 `T` 是 `std::auto_ptr<int>`. 其中原因也很容易看出来, C++11 之前, `vector::push_back` 会以复制的方式传入的元素放入存储区内, 即要求模板参数类型 `T` 具有 `T(T const&)` 的复制构造函数定义, 而 `auto_ptr` 没有这一复制构造函数重载. 更确切地说, `auto_ptr` 正是被设计得不具备这一定义, 实际上, 它的看起来像复制构造的构造函数定义与一般意义上的复制构造函数截然不同, 源代码如下
+
+```
+// backward/auto_ptr.h:86
+template<typename _Tp>
+class auto_ptr
+{
+private:
+    _Tp* _M_ptr;
+public:
+    typedef _Tp element_type;
+
+    // :112
+    // 要求可以修改参数引用的 "复制" 构造函数
+    auto_ptr(auto_ptr& __a) throw()
+        : _M_ptr(__a.release())
+    {}
+
+    template<typename _Tp1>
+    auto_ptr(auto_ptr<_Tp1>& __a) throw()
+        : _M_ptr(__a.release())
+    {}
+
+    // :135
+    // 要求可以修改参数引用的赋值算符重载函数
+    auto_ptr& operator=(auto_ptr& __a) throw()
+    {
+        reset(__a.release());
+        return *this;
+    }
+
+    template<typename _Tp1>
+    auto_ptr& operator=(auto_ptr<_Tp1>& __a) throw()
+    {
+        reset(__a.release());
+        return *this;
+    }
+
+    // :170
+    ~auto_ptr()
+    {
+        delete _M_ptr;
+    }
+
+    // :224
+    element_type* release() throw()
+    {
+        element_type* __tmp = _M_ptr;
+        _M_ptr = 0;
+        return __tmp;
+    }
+
+    // :239
+    void reset(element_type* __p = 0) throw()
+    {
+        if (__p != _M_ptr) {
+            delete _M_ptr;
+            _M_ptr = __p;
+        }
+    }
+};
+```
+
+这段代码摘选了 `auto_ptr` 中一些构造函数与相关成员函数的实现, 可以看到 `auto_ptr` 既不需要空间配置器也不支持设定指针释放方法, 析构函数实现中指明了该指针最终会被 `delete` 掉的命运. 代码很容易读懂, 唯一需要注意的就是之前说到的, 它并没有一般意义上的复制构造函数, 这里列出的两个构造函数以及两个 `operator=` 的重载都要求传入参数是一个非 `const` 引用, 以便在新对象构造完毕或赋值完毕后重置来源对象的指针为空.
+
+= 指针语义
+
+在介绍 C++11 标准中引入了新的替代方案之前, 先说说为什么自动释放资源的指针类型很重要, 或者反过来说为什么尽可能**不要**在代码中使用裸指针类型. 原因是不利于代码阅读. 比如这个 API
+
+```-
+struct hostent {
+   char  *h_name;
+   char **h_aliases;
+   int    h_addrtype;
+   int    h_length;
+   char **h_addr_list;
+};
+
+struct hostent *gethostbyname(const char *name);
+```
+
+它返回一个指针, 这样的声明会让用户对返回值心存顾虑, 得继续看一下文档该怎么处理这个指针, 比如当上下文结束之后是否需要释放之类的; 当然更糟糕的是这个指针指向的结构体里有相当多的指针甚至指针的指针, 是否需要对它们进行一一释放? 换句话说, 这个 API 并不能很好地自文档化, 除非改名字叫
+
+```
+struct hostent *gethostbyname_returns_pointer_to_static_data_so_dont_free(const char*);
+```
+
+但如果这是一个 C++ 风格的 API, 倘若使用过时的 `auto_ptr`, 对于用户而言仍会是非常易懂的
+
+```
+auto_ptr<struct hostent> gethostbyname(const char *name);
+```
+
+如果返回值是这么声明的, 作为调用者当然立即知道要怎么去处理.
+
+而封装的指针类型能与容器配合产生更好的可读性也是基于此原因. 假如在代码里看到一个这样的类定义
+
+```
+class InputFiles {
+    std::vector<std::istream*> files;
+public:
+    void add(std::istream* i)
+    {
+        files.push_back(i);
+    }
+
+    // ...
+
+    ~InputFiles();
+};
+```
+
+成员 `files` 中也许有成吨的指针, 但用户并不知道每个指针来自于哪里, 也不能确定在 `InputFiles` 的实例析构时这些指针指向的对象是否会被自动 `delete`, 自然也无法确定能否将 `std::cin` 的地址放进去, 等等, 除非阅读了文档甚至阅读了整个 `InputFiles` 析构有关的实现.
+
+如果定义是这样就太赞了
+
+```
+class InputFiles {
+    std::vector<std::auto_ptr<std::istream> > files;
+public:
+    void add(std::auto_ptr<std::istream> i)
+    {
+        files.push_back(i);
+    }
+};
+```
+
+以上定义可以一目了然地自诠释 `files` 里的所有元素会随着 `InputFiles` 析构而析构, 只剩下一个问题: 它无法编译.
+
+= `unique_ptr`
+
+如上所述的这样, 在 C++11 标准之前自文档性和编译性似乎是有矛盾的, 而这一点在移动语义和 `unique_ptr` 引入后被改变了. 这个新引入的模板类型的主要用途便是自动地管理控制权单一的一个指针或一个动态数组. 例如, 它可以被以如下方式使用
+
+```
+#include <memory>
+#include <vector>
+#include <fstream>
+
+int main()
+{
+    // 利用 unique_ptr 管理一个 new 获得的对象地址, 与 auto_ptr 功能类似
+    std::unique_ptr<int> one(new int(1));
+
+    // 利用 unique_ptr 管理一个 new 获得的数组地址, 这一点 auto_ptr 无法做到
+    std::unique_ptr<int[]> int_arr(new int[10]);
+
+    // 使用对象池来管理某个类型的对象的方案
+    struct ObjectInPool {
+        static ObjectInPool* create()
+        {
+            // 创建对象
+            return new ObjectInPool;
+        }
+
+        static void destroy(ObjectInPool* obj)
+        {
+            // 销毁对象
+            delete obj;
+        }
+    private:
+        ~ObjectInPool() {}
+    };
+    // 那么此时 unique_ptr 类型声明需要指定第二个模板参数
+    // 并且在构造时传入相对应的函数作为第二参数
+    std::unique_ptr<ObjectInPool, void(*)(ObjectInPool*)> obj(
+            ObjectInPool::create(), ObjectInPool::destroy);
+
+    // 从一个 unique_ptr 构造另一个 unique_ptr
+    // 编译错误! unique_ptr 并没有从左值或 const 限定左值引用构造的函数重载
+    std::unique_ptr<int> two(one);
+    // 正确, unique_ptr 支持以右值引用类型进行移动构造
+    std::unique_ptr<int> three(std::move(one));
+
+    // 将 unique_ptr 作为 vector 的元素使用可行
+    // 因为 vector::push_back 有接受右值引用的重载
+    std::vector<std::unique_ptr<std::istream>> files;
+    files.push_back(std::unique_ptr<std::istream>(
+            new std::ifstream("hello.txt", std::ifstream::in)));
+    return 0;
+    // 以上所有栈区的 unique_ptr 和被包含在 vector 中的 unique_ptr 都会析构并自动释放其控制的资源
+}
+```
+
+与 `auto_ptr` 相比, `unique_ptr` 除了提供了更加灵活的析构时行为覆盖机制, 还可以作为 `vector` 或其他 STL 容器的模板参数使用 (当然这个特性得益于所有 STL 容器都支持使用移动构造添加元素, 后文将提到).
+
+现在来一探 `unique_ptr` 的实现. 首先是默认的指针销毁函数包装类型
+
+```
+// bits/unique_ptr.h:53
+template<typename _Tp>
+struct default_delete
+{
+    // ...
+
+    // :62 对 delete 的包装
+    void operator()(_Tp* __ptr) const
+    {
+        // 判定模板参数类型 _Tp 是否已经给出完整定义
+        static_assert(sizeof(_Tp) > 0, "can't delete pointer to incomplete type");
+        delete __ptr;
+    }
+};
+```
+
+它以及代码中后面一个针对数组类型的模板偏特化是 `unique_ptr` 的官方指定默认第二模板参数类型; 而主菜 `unique_ptr` 的主要成员函数则如下
+
+```
+// : 108
+template <typename _Tp, typename _Dp = default_delete<_Tp> >
+class unique_ptr
+{
+    class _Pointer {
+        template<typename _Up>
+        static typename _Up::pointer __test(typename _Up::pointer*);
+
+        template<typename _Up>
+        static _Tp* __test(...);
+
+        typedef typename remove_reference<_Dp>::type _Del;
+    public:
+        typedef decltype(__test<_Del>(0)) type;
+    };
+
+    // : 126
+    // 将指针类型和删除行为类型定义为一个整体 tuple
+    //     tuple 将在后面的可变参数模板章节中介绍; 以下这种情况可以认为它等同于一个 std::pair
+    typedef std::tuple<typename _Pointer::type, _Dp>  __tuple_type;
+    __tuple_type _M_t;
+public:
+    typedef typename _Pointer::type pointer;
+    typedef _Tp element_type;
+    typedef _Dp deleter_type;
+
+    // ...
+
+    // 从裸指针构造, 接管这个指针并默认构造一个删除处理类型对象
+    explicit unique_ptr(pointer __p) noexcept
+        : _M_t(__p, deleter_type())
+    {
+        static_assert(!is_pointer<deleter_type>::value,
+                      "constructed with null function pointer deleter");
+    }
+
+    // ...
+
+    // :415
+    // 获取指针
+    // std::get<0> 是从 tuple 类型中取得相应位置的元素的方法
+    // 若将 _M_t 看作一个 std::pair, std::get<0>(_M_t) 等价于 _M_t.first
+    pointer get() const noexcept
+    {
+        return std::get<0>(_M_t);
+    }
+
+    // :248
+    // 将指针的控制权交给调用者, 并重置此 unique_ptr 为空
+    pointer release() noexcept
+    {
+        pointer __p = get();
+        std::get<0>(_M_t) = pointer();
+        return __p;
+    }
+
+    // :159
+    // 移动构造函数
+    // 令参数交出其内含指针的控制权, 用于初始化自身
+    // 对于构造 deleter_type 使用到的 std::forward 函数会在后文中详细介绍
+    unique_ptr(unique_ptr&& __u) noexcept
+        : _M_t(__u.release(), std::forward<deleter_type>(__u.get_deleter()))
+    {}
+
+    // :236
+    // 获取 deleter; std::get<1> 相当于取 std::pair 的 second 成员
+    deleter_type& get_deleter() noexcept
+    {
+        return std::get<1>(_M_t);
+    }
+
+    // :180
+    // 析构函数: 若有必要, 删除指针指向的对象
+    ~unique_ptr() noexcept
+    {
+        auto& __ptr = std::get<0>(_M_t);
+        if (__ptr != nullptr)
+            get_deleter()(__ptr);
+        __ptr = pointer();
+    }
+
+    // :273
+    // 删除复制构造函数和复制赋值算符
+    unique_ptr(const unique_ptr&) = delete;
+    unique_ptr& operator=(const unique_ptr&) = delete;
+};
+```
+
+以上. `unique_ptr` 的使用方式以及代码实现中关于指针控制权管理和移交的部分并没有太难以理解的部分, 然而它无疑是 C++11 中非常重要的一个进步. 回顾这门脱胎于 C 的语言, 在 C 之上又增加了很多包装, 这些包装并不是为了显示华丽的技巧, 而往往是为了代码的可读性, 即代码应该一定程度上不需要注释就能表达清楚自身的作用. C++ 中引入 `std::string` 类型去替代 `char*`, 因为后者不能很好地表达它到底是一个字符串还是单纯的一个字符的地址; 而 C++ 中又引入引用类型 `char&` 来确定地表达这是一个字符的引用, 这是在类型系统上 C++ 做出的努力. 而在资源管理方面, C++ 做出的努力就是 `unique_ptr`, `shared_ptr` 等这些自动指针类型替代裸指针类型来明确其控制权.
+
+= 容器元素类型的需求
+
+在上文中提到了所有 STL 容器都支持使用移动构造添加元素, 这一点用标准的语言来说是元素类型是 "可移动构造的" (move-constructible) 或 "可复制构造的" (copy-constructible). 标准库中甚至提供了一些这样的类型判定工具, 如
+
+```!
+#include <memory>
+#include <type_traits>
+
+static_assert(std::is_move_constructible<std::auto_ptr<int>>::value,
+              "auto_ptr is not move-constructible");
+static_assert(std::is_copy_constructible<std::auto_ptr<int>>::value,
+              "auto_ptr is not copy-constructible"); // 这一句报错
+```
+
+这段代码编译时, 编译器便会指出第二个 `static_assert` 的条件不满足. 但第一个 `static_assert` 没有报错, 是否意味着 `auto_ptr` 是可移动构造的因而可以当作 `vector` 的参数呢?
+
+确实, 在代码中单独写上一行 `std::vector<std::auto_ptr<int>> x;` 的定义并不会引起编译错误, 甚至一些情况下使用 `push_back` 也不会引起编译错误, 如
+
+```
+// 单独一个定义, 不会编译错误
+std::vector<std::auto_ptr<int>> x;
+
+// 使用右值 push_back 也不会引起编译错误
+x.push_back(std::auto_ptr<int>(new int));
+
+// 使用左值 push_back 才会引起编译错误
+std::auto_ptr<int> m(new int);
+x.push_back(m);
+```
+
+所以需要说明的是, `vector` 或其他容器并不是要求只要元素满足可移动构造或可复制构造两个特性之一便可, 并且不同的成员函数的使用方式对类型参数的要求可能是不同的. 一般而言, STL 容器对元素类型的基本要求是 "可擦除的" (erasable); 而要调用 `push_back` 则需要右值参数满足可移动插入 (move-insertable) 或其他参数满足可复制插入 (copy-insertable). 这些概念 (C++ concepts) 的定义实际上与一连串有些冗长的 `allocator_traits` 有关, 这里就不展开介绍了. 而上面例子里最后一次调用 `push_back` 出错就是因为左值的 `auto_ptr` 不满足可复制插入的概念.
+
+= 在容器中存储引用
+
+对象引用 (如 `std::string&` 类型) 并不满足以上容器对元素的移动或复制的要求, 因而无法声明一个 `std::vector<std::string&>` 的容器实例. 这是由于 C++ 的设计, 引用在初始化的时候必须指定所引用的对象, 并且之后不能再变更. 如
+
+```
+std::string message("hello, world");
+std::string& ref_to_msg = message;
+
+std::string another_message("nihao, shijie");
+
+// 此处的等号并不能将引用变更为指向 another_message
+// 而是等价于调用被引用的 message.operator=(another_message)
+ref_to_msg = another_message;
+```
+
+相对而言, 裸指针类型却都是完完全全的值类型, 这一点上无疑引用与指针的语义有天壤之别. 而要表现一个存储 "弱" 引用的容器, 自然要借助一些包装类型.
+
+在 C++11 中, 标准库引入了一个模板类型 `reference_wrapper` 来替代引用本身的语义, 其目的明晰, 用法简单, 虽然名字略长, 不便书写. 如
+
+```
+#include <functional> // reference_wrapper, ref, cref
+#include <iostream>
+#include <vector>
+#include <string>
+
+int main()
+{
+    std::string message("hello, world");
+    std::string message_pinyin("nihao, shijie");
+
+    std::vector<std::reference_wrapper<std::string>> messages;
+    // std::ref 构造一个相应类型的 std::reference_wrapper 对象 (如 std::make_pair 之于 std::pair)
+    messages.push_back(std::ref(message));
+    messages.push_back(std::ref(message_pinyin));
+
+    // get() 获得引用; 此处赋值等价于赋值给 message
+    messages[0].get() = "Hello, world!";
+    std::cout << message << std::endl;         // 输出: Hello, world!
+
+    // const 限定引用包装
+    //   对 reference_wrapper 的参数添加 const
+    //   使用 cref 构造引用对象
+    std::reference_wrapper<std::string const> const_msg = std::cref(message);
+    // const_msg.get().clear(); // 编译错误: get() 获取的是 const 限定引用
+    std::cout << const_msg.get() << std::endl; // 输出: Hello, world!
+
+    // 通过赋值可以让 reference_wrapper 绑定到另一个对象上
+    const_msg = message_pinyin;
+    std::cout << const_msg.get() << std::endl; // 输出: nihao, shijie
+
+    // 上面一句变更 reference_wrapper 绑定的对象不会影响它原来绑定的对象
+    std::cout << message << std::endl;         // 输出: Hello, world!
+    return 0;
+}
+```
+
+当然, 使用 `reference_wrapper` 时, 一定要确保其绑定的对象本身没有被析构掉, 否则会产生未定义行为.
+
+除了兼容容器元素之外, `std::reference_wrapper` 以及 `std::ref`/`std::cref` 也广泛用于各种可能需要传递引用的场景, 在后文的可变参数模板, 多线程等部分都会提到它们. 而所有这些指针和引用的封装类型的引入使绝大部分情形都可以使用对象而不是裸指针来编写程序:
+
+* 若对象有严格的单一控制权, 使用 `unique_ptr`
+* 若对象可能会由多个控制者决定生命周期, 使用 C++11 中引入的 `shared_ptr`
+* 若只引用而并不具有对象的控制权, 使用引用; 如果要作为容器元素, 或对象成员等可更改绑定的场景, 使用 `reference_wrapper`
+
+剩下的一小部分? 当与 C API, 特别是操作系统 API 交互时会有必要用到裸指针, 不过这时最好提供一个 C++ 的包装.

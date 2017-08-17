@@ -1,0 +1,27 @@
+<table class='md-table'>
+    {% if caption %}
+    <caption>{{ caption|e }}</caption>
+    {% endif %}
+
+    {% if head_rows %}
+    <thead>
+        {% for row in head_rows %}
+        <tr>
+            {% for cell in row %}
+            <th>{{ cell.content }}</th>
+            {% endfor %}
+        </tr>
+        {% endfor %}
+    </thead>
+    {% endif %}
+
+    <tbody>
+        {% for row in body_rows %}
+        <tr>
+            {% for cell in row %}
+            <td>{{ cell.content }}</td>
+            {% endfor %}
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>

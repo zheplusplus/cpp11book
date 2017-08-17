@@ -1,0 +1,41 @@
+在编写代码时, 可以为一些类型设置别名, 使得代码更容易理解. 在既有标准中, 可以使用 `typedef` 关键字定义类型的别名. 如
+
+```
+typedef unsigned char byte;
+```
+
+以上代码中将类型 `unsigned char` 定义为 `byte`. 就这样直白的别名设置而言, `typedef` 还算看得过去, 但下面这些情况就略显晦涩了
+
+```
+typedef int int_arr[10];
+typedef int (* fn_type)(int, int);
+```
+
+其中第一个别名设置是将 10 个 `int` 构成的数组定义成名为 `int_arr` 类型; 第二个则定义了名为 `fn_type` 类型, 它的类型是函数指针, 这类函数指针指向的函数接受两个 `int` 参数, 返回一个 `int`. 这两种类型别名的语法都将名字放在了语句中间某个位置, 读起来并不直观.
+
+为了改善这一弊端, 在 C++11 中为 `using` 指派了一个新功能, 使得用户可以用更加清晰的方式为类型指定别名. 以上面三种类型别名为例, 它们可写作
+
+```
+// 语法形式为
+// using 别名 = 类型
+using byte = unsigned char;         // 普通类型, 直接写在等号右侧
+using int_arr = int[10];            // 数组类型, 用类型名加上方括号和数量
+using fn_type = int (*)(int, int);  // 函数指针类型, 在返回值类型和参数列表之间加上 (*)
+```
+
+这一语法形式与 `typedef` 不同的是, 在类型别名和实际的类型之间, 显式地插入了一个等号, 等号左边的标识符就是别名. 如此一来, 用户在阅读代码时就能立即明白为怎样的类型设置了什么别名.
+
+除了提供更为明了的类型别名语法, `using` 还可支持泛型类型定义, 如
+
+```!
+// 语法: 在 template < ... > 泛型声明后立即加上 using 语句
+// 泛型参数 T 必须指定, 而 Alloc 有默认值 std::allocator<T>
+template <typename T, typename Alloc = std::allocator<T>>
+using vec_iter = typename std::vector<T, Alloc>::iterator;
+
+std::vector<int> x;
+// 使用 int 特化 vec_iter 别名, 另一泛型参数是默认的 std::allocator<int>
+// 因此特化出的类型 vec_iter<int> 为
+// std::vector<int, std::allocator<int>>::iterator
+vec_iter<int> i = x.begin();
+```

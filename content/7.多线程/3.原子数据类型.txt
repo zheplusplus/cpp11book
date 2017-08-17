@@ -1,0 +1,274 @@
+这一节将介绍可被线程共享访问的基本数据类型.
+
+当提到多线程共享访问同一变量时, 不得不提到现在标准中的 `volatile` 关键字. 在维基百科上有这样一个例子
+
+```
+static volatile int foo; // 声明为 volatile
+
+void bar (void) {
+    foo = 0;
+
+    while (foo != 255)
+        ;
+}
+```
+
+若不加上 `volatile` 关键字, 编译器优化时可能得出 `foo != 255` 永久为真的结论, 进而导致无限循环的可能. 在多线程环境下, 将 `foo` 设定为 `volatile` 是一种必要手段.
+
+但是 `volatile` 关键字与多线程无关, 它只是一处内存屏障 (memory barrier) 防止编译器优化或硬件缓存取到过期数据, 并没有其他保障. 因此如果要在多线程环境下共享使用一些简单的数据类型, 还是需要使用原子数据类型.
+
+= 原子数据类型
+
+按照说明多线程数据竞争的惯例, 还是先给出一个例子, 几个线程同时调整一个全局变量, 那么最终它的取值会是随机的
+
+```
+#include <thread>
+#include <iostream>
+
+static volatile int global = 0;
+
+void incr(int times)
+{
+    for (int i = 0; i < times; ++i) {
+       ::global += 1;
+    }
+}
+
+void decr(int times)
+{
+    for (int i = 0; i < times; ++i) {
+       ::global -= 1;
+    }
+}
+
+int main()
+{
+    std::thread a(incr, 100000);
+    std::thread b(decr, 100000);
+    a.join();
+    b.join();
+    std::cout << ::global << std::endl;
+    return 0;
+}
+```
+
+在标准中将以上可能并发同时写一个内存位置, 或一个线程写, 同时可能有其他线程读的行为都认定为未定义行为.
+
+要使用标准库中的设施来消除数据竞争, 最简易的方式是使用原生数据类型的原子化版本.
+
+```
+#include <thread>
+#include <iostream>
+#include <atomic>                   // atomic 模板
+
+static std::atomic<int> global(0);  // 使用 atomic<int>
+
+// 其他代码不变
+```
+
+这样 `::global += 1` 或 `::global -= 1` 这样的表达式在不同线程间就会加上简单但有效的同步.^[[严格地说应该调用 `global.is_lock_free()` 检查此数据类型的各种操作是否在当前硬件结构中是免锁的; x86 平台上标准库提供的所有 `atomic` 类型都是免锁的.]]
+
+虽然 `std::atomic` 是一个模板, 但标准库中只对原生整型类型 (`int`, `unsigned long long`, `char` 等等), 任何指针类型和 `bool` 类型有完整定义, 因为这些类似整数或类似整数的类型的类型的行为具备最广泛的硬件支持, 而其它的类型有些虽然可以定义, 但没有预定义累加写回等操作, 使用会相当不便, 如
+
+```
+std::atomic<double> x(0.0); // 可以定义
+x += 1.0;                   // 累加就会导致编译错误
+```
+
+所有标准库中提供的预定义原子整数类型和原子 `bool` 类型也都有非模板语法的别名. 如
+
+```
+std::atomic<int> i;
+std::atomic_int j;              // 这两个类型等价
+
+std::atomic<unsigned short> s;
+std::atomic_ushort t;           // 这两个类型等价
+
+std::atomic<bool> f;
+std::atomic_bool h;             // 这两个类型等价
+
+// 等等
+```
+
+另外有一处细节需要注意, 就是 `atomic` 变量在初始化时不能写成
+
+```
+std::atomic<int> global = 0; // 错误
+```
+
+因为 `atomic` 只具有以下两个构造函数和被删除的复制构造函数
+
+```
+template <typename T>
+struct atomic {
+    atomic();
+    constexpr atomic(T t); // 从基本类型转换构造是隐式的
+    atomic(atomic const&) = delete; // 不可复制
+};
+```
+
+而编译器对使用等号的构造的解释是先将 0 隐式转换为临时 `std::atomic<int>` 对象, 然后再复制构造给 `global`, 而复制构造是不可用的, 于是出现错误. 这时必须改为使用括号的构造方法. 能够编译通过的写法包括
+
+```
+std::atomic<int> global(0);
+std::atomic<int> global{0};
+std::atomic<int> global = {0};
+```
+
+除了加减数值并写回之外, 整数原子类型和指针原子类型提供的算符重载还包括前置或后置的自增自减算符重载, 对整数原子类型还提供了位运算并写回的算符重载, 所有这些运算都是原子的. (但并没有 `operator*=`, `operator%=` 等乘除法, 取模或移位并写回的原子操作)
+
+```
+std::atomic_int x;
+x = 13;
+x |= 7;
+x ^= 9;
+std::cout << x << std::endl;        // 6
+
+int a[] = {2, 3, 5, 7, 11};
+std::atomic<int*> p{a + 1};
+std::cout << *p-- << std::endl;     // 3
+p += 2;
+std::cout << *++p << std::endl;     // 7
+```
+
+而所有这些算符重载实际上又是对直接提供的一组成员函数重载的包装或转调, 它们包括
+
+|! 算符重载 | 对应的成员函数调用式
+| `+=` | `fetch_add`
+| `-=` | `fetch_sub`
+| `&=` | `fetch_and`
+| `\|=` | `fetch_or`
+| `^=` | `fetch_xor`
+| 前置 `++` | `fetch_add(1) + 1`
+| 后置 `++` | `fetch_add(1)`
+| 前置 `--` | `fetch_sub(1) - 1`
+| 后置 `--` | `fetch_sub(1)`
+
+其中前置或后置的自增或自减算符等价于第二列对应的表达式, 但 `+=` `-=` 等算符与 `fetch_*` 的返回值则有所不同. 算符重载返回的是运算后的结果, 但 `fetch_*` 返回的是运算前的值.
+
+另外, 直接对原子类型赋值以普通类型的值, 或隐式从原子类型转换为普通类型的值, 则有另外一组 API: `load()` 用于获取值, 以及 `store(T value)` 用于将数值写入原子类型变量中.
+
+也就是说, 之前例子中的前一部分, 与下面这样的写法结果一样
+
+```
+std::atomic_int x;
+x.store(13);                        // 赋值算符是 store 操作
+x.fetch_or(7);                      // |= 是 fetch_or 操作
+x.fetch_xor(9);                     // ^= 是 fetch_xor 操作
+std::cout << x.load() << std::endl; // 获取值是 load 操作
+```
+
+而所有以上这些 API 除了有些接受一个数值型参数之外, 都可以另外传入一个调整内存顺序 (memory order) 的参数, 若未提供, 则默认是最强的内存顺序参数: 顺序一致 (sequentially consistent).
+
+= 内存顺序
+
+在 C++11 引入多线程之后, 给编译器实现的挑战不仅限于内存模型和一些库, 另一与硬件架构紧密联系的内存顺序概念与一些编译优化的控制也被纳入标准.
+
+在没有多线程的情况下, 编译器可以根据一些优化规则调整生成指令之间的顺序, 而更底层地, 硬件在执行指令时可以通过乱序流水线加快执行速度, 以及将对变量的访问局限于缓存中而不是写回内存或从内存读取最新值. 这些优化的手段在多线程引入之后都面临一个基本问题: 指令乱序执行的结果会对其他线程造成的可察觉的影响.
+
+比如这样的一段代码
+
+```
+volatile bool x = false;
+volatile bool y = false;
+
+void store()
+{
+    x = true;
+    y = true;
+}
+
+void load()
+{
+    while (!y)
+        ;
+    if (x) {
+        std::cout << "x is true\n";
+    } else {
+        std::cout << "x is false\n";
+    }
+}
+
+int main()
+{
+    std::thread a(store);
+    std::thread b(load);
+    a.join();
+    b.join();
+    return 0;
+}
+```
+
+虽然在代码中 `store` 函数先修改 `x` 为真, 然后才修改 `y`, 但在实际运行过程中, 有可能因为编译优化导致 `store` 中指令顺序被调换, 也有可能在执行的时候, 两条指令被乱序执行, 最终导致 `x is false` 输出.
+
+在 C++11 中就提供了这样的优化防止选项, 不过这一选项并不是编译器参数, 而是可以灵活指定给每一条原子变量操作函数的. 如, 上面无任何防护的代码, 以加之于 C++11 原子变量操作的内存顺序参数等价于以下代码
+
+```
+std::atomic_bool x(false);
+std::atomic_bool y(false);
+
+void store()
+{
+    x.store(true, std::memory_order_relaxed);
+    y.store(true, std::memory_order_relaxed);
+}
+
+void load()
+{
+    while(!y.load(std::memory_order_relaxed))
+        ;
+    if (x.load(std::memory_order_relaxed)) {
+        std::cout << "x is true\n";
+    } else {
+        std::cout << "x is false\n";
+    }
+}
+```
+
+例子中, 所有的 `store` 和 `load` 函数, 也就是赋值和隐式转换所代表的两个函数都额外接受了一个 `std::memory_order_relaxed` 参数, 这个参数就是最弱的松散顺序要求. 相对地, 默认的顺序参数为 `std::memory_order_seq_cst`, 要求原子操作全部以串行方式执行, 至少对其他线程表现出的结果必须是这样.^[[现实中, x86 总能保证这一最强的内存顺序, 而编译器在处理原子变量时也异常小心翼翼, 所以上面使用 `memory_order_relaxed` 的例子在 x86 机器上不会出现输出 `x is false` 的情况.]]
+
+介于两者之间又另有 4 个不同的参数, 其中按照读取要求和写回要求分为三种. 对原子读取有要求的 `std::memory_order_consume`, `std::memory_order_acquire` 就不能用于 `store` 函数, 而对于原子写回有要求的 `std::memory_order_release` 则不能用于 `load` 函数. 还有一个 `std::memory_order_acq_rel` 则用于像 `fetch_add` 这样的 RMW 操作 (读取-修改-写回, read-modify-write). 它们的具体规则如下
+
+| `memory_order_consume` | 所有在此读操作之后的直接依赖于此操作对应的原子变量的读操作不能在此操作之前执行
+| `memory_order_acquire` | 所有在此读操作之后的读操作不能在此操作之前执行
+| `memory_order_release` | 所有在此写操作之前的写操作不能在此操作之后执行; 写回的内容对其他线程立即可见
+| `memory_order_acq_rel` | 用于 `fetch_*` 函数, 同时具有 `memory_order_acquire` 和 `memory_order_release` 的效用
+
+其中 `memory_order_consume` 与 `memory_order_acquire` 在后续语句中的变量读取是否 "直接依赖读取的原子变量", 在一般情况下并不会造成问题, 但在一些特殊的依赖关系中会引起混乱. 考虑以下代码片段
+
+```
+struct T { int a; }
+
+std::atomic<T*> ptr(nullptr);
+std::atomic_int value(0);
+
+void store_thread(T* x)
+{
+    value.store(1, std::memory_order_release);                  // (a)
+    ptr.store(x, std::memory_order_release);                    // (b)
+}
+
+void load_thread(T* q)
+{
+    T* p;
+    if ((p = ptr.load(std::memory_order_consume)) != nullptr) { // (c)
+        int r = value.load(std::memory_order_consume);          // (d)
+        if (q->a == p->a) {                                     // (e)
+            // ...
+        }
+    }
+}
+```
+
+在 `store_thread` 执行时使用的内存顺序为 `std::memory_order_release` 因此这两条写入 (a) 和 (b) 不会调换顺序; 而在 `load_thread` 中, (e) 处的比较操作 `q->a == p->a` 直接依赖于 (c) 处的结果, 因此 (e) 处的操作不会被调换到 (c) 之前; 但 (c) (d) 两个 `load` 语句不是直接依赖的, 因此可以调换顺序. 这种调换顺序一般也不会有问题, 因为如果语句 (b) 还没执行, 分支 (c) 的条件就不会为真; 反过来若 (b) 执行了, 那么 (a) 一定也执行了, 这时才会进入分支, (d) 处的 `load` 才会起作用, 因此 (d) 应该也在 (a) 之后执行. 然而, 在允许分支预测的体系结构中, 可能出现以下的执行顺序而破坏这种预设
+
+* 分支预测认为 (c) 处条件为真, 预执行了 (d), 使得 `r` 的初始值可能为 0
+* 顺序执行 (a) (b)
+* 执行 (c)
+* 确信分支预测正确, 保留第一步执行的结果
+
+从语义上来说 (c) 与 (d) 两处存在依赖关系, 但在数据上这种依赖不够 "直接", 因此允许 (d) 调整顺序到 (c) 之前, 从而导致意料之外的结果.
+
+以上就是从具体硬件体系结构抽象出来的内存顺序模型, 合理地使用它们在一些特定情况下能让程序获得最优的性能. 但若用户没有精力甄选准确用于具体问题的顺序模型, 选择默认的顺序一致模型也未尝不可.
+
+需要注意的是, 这些内存模型参数都是枚举常量, 且并不存在简单的累加或位或关系, 比如 `memory_order_acq_rel` 并不等于 `memory_order_acquire | memory_order_release`.

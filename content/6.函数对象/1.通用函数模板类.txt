@@ -1,0 +1,649 @@
+Lambda 语法说到底也只是新加入标准的函数对象简便写法, 考虑到既有的具名函数对象类型, 以及 C 中就存在的函数指针. 为了兼容所有这些具有函数行为的对象, C++11 中引入了一个强有力的模板类型 `std::function`, 为函数对象的使用提供了更多便利.
+
+= 基本用法
+
+标准库中新增的 `function` 是一个用来为不同函数对象以及函数指针提供统一对外接口的模板类型. 它的声明语法采用了一种较为少见的形式
+
+```
+// 以下声明没有实现
+// functional:1865
+template<typename _Signature>
+class function; // 没有定义, 不可特化
+
+// 能特化的只有下面这种偏特化声明形式
+// :2173
+template<typename _Res, typename... _ArgTypes>
+class function<_Res(_ArgTypes...)> // 实际被使用的偏特化
+                                   // 函数签名形式的类型组合 _Res(_ArgTypes...) 是一个整体
+// ...
+```
+
+在之后介绍 `function` 对象的实现时会介绍上述语法, 这里先来看看 `function` 模板的一般用法.
+
+首先, 单纯一个类型实参是无法特化的, 如 `function<int>` 是不能编译的. 其需要以返回值类型和参数类型进行特化, 如果此函数对象的 `operator()` 重载没有参数, 也应当在返回值类型之后加上一对空的圆括号. 比如
+
+```
+#include <functional> // 此头文件包含 function
+#include <iostream>
+
+int sum_square(int x, int y);
+
+int main()
+{
+    std::function<int()> make0([]() { return 0; }); // 以无捕获的 lambda 初始化
+    //            ^  ^
+    //            |  此函数对象类型的 operator() 无需参数
+    //            此函数对象类型的 operator() 返回值类型为 int
+    std::cout << "make0() returns " << make0() << std::endl; // 输出: make0() returns 0
+
+    std::function<int(int, int)> fn(sum_square); // 以函数指针初始化
+    //            ^   ^    ^
+    //            |   此函数对象类型的 operator() 的参数为 int, int
+    //            此函数对象类型的 operator() 的返回值类型为 int
+    std::cout << fn(1, 2) << std::endl;                      // 输出: 9
+
+    int i = 5;
+    fn = [=](int a, int b)                                   // 赋值以捕获单个 int 的 lambda 对象
+    {
+        return a + b + i;
+    };
+    std::cout << fn(1, 10) << std::endl;                     // 输出: 16
+
+    return 0;
+}
+
+int sum_square(int x, int y)
+{
+    return (x + y) * (x + y);
+}
+```
+
+除了跟 lambda 一样在函数内部使用之外, `std::function` 的特化类型能很方便地用作函数返回值类型, 参数类型和类的成员类型
+
+```
+struct MyClass {
+    int x;
+    int y;
+    std::function<int(int, int)> f; // 作为成员
+
+    // 作为函数参数
+    MyClass(int xx, int yy, std::function<int(int, int)> fn)
+        : x(xx)
+        , y(yy)
+        , f(fn)
+    {}
+
+    int call()
+    {
+        return this->f(this->x, this->y);
+    }
+};
+
+// 作为返回值类型
+std::function<int(int, int)> make_fn(int u, int v)
+{
+    int m = 5;
+    int n = 8;
+    int p = 13;
+
+    // 以捕获了上下文 5 个 int 的 lambda 对象隐式构造 function 对象
+    return [=](int a, int b)
+    {
+        return a + b + u + v + m + n + p;
+    };
+}
+
+int main()
+{
+    MyClass m(1, 1, make_fn(2, 3));
+    std::cout << m.call() << std::endl; // 33
+
+    // 赋值以其它 lambda
+    m.f = [](int, int) { return 4; };
+    std::cout << m.call() << std::endl; // 4
+    return 0;
+}
+```
+
+上面的例子中需要注意的是, 在 `make_fn` 函数返回后, `return` 语句中临时的 lambda 对象会被复制到 `function` 对象中去, 因此在 `make_fn` 函数调用后使用其返回值是可行的. 当然, 如果一个 lambda 以引用方式捕获上下文中的对象, 然后用这个 lambda 构造 `function` 对象, 构造出的 `function` 对象会仍然以引用形式使用 lambda 中捕获的内容, 调用 `operator()` 时必须保证其生命周期的有效性.
+
+除了用 lambda 对象构造或赋值产生 `function` 对象之外, `function` 对象本身也支持复制构造和赋值. 尤其是赋值方面, 只要等号两侧两个 `function` 对象的类型一致即可. 如
+
+```
+int i = 0;
+std::function<void(std::string const&)> fn = [i](std::string const& s) mutable
+{
+    std::cout << ++i << ". " << s << std::endl;
+};
+fn("first");                                   // 输出: 1. first
+fn("second");                                  // 输出: 2. second
+
+// 从 fn 复制构造得到 gn, 调用时, 内部 lambda 捕获的 i 与 fn 一致
+std::function<void(std::string const&)> gn(fn);
+gn("third");                                   // 输出: 3. third
+// 调用 gn 不影响 fn 的状态, 此处使用 fn 输出的序号仍然是 3
+fn("fourth");                                  // 输出: 3. fourth
+
+gn = [](std::string const& s)
+{
+    std::cout << "0. " << s << std::endl;
+};
+
+// 然后将 gn 赋值给 fn, 这样会使得 fn 的状态变得跟 gn 一样
+fn = gn;
+fn("nothing");                                 // 输出: 0. nothing
+```
+
+从上面的例子中也可以看出来, 不同 `function` 对象进行复制时, 对内含 lambda 的复制是深复制.
+
+`function` 克服了 lambda 在类型方面的缺陷, 可以用在 lambda 无法使用的地方, 也支持相互赋值的行为. 但是 `function` 对象的实例还是不能互相比较, 实际上, 它们只可以跟空指针进行等于或不等于的比较
+
+```
+int sum_square(int x, int y);
+
+int main()
+{
+    std::function<int(int, int)> fn(sum_square);
+    std::function<int(int, int)> gn = [](int a, int b)
+    {
+        return (a + b) * (a + b);
+    };
+
+    // 下面这一句会导致编译错误, 两个 function 对象不能比较
+    std::cout << (fn == gn) << std::endl;
+
+    // function 对象可以跟 nullptr 进行比较, 以判定该函数对象是否为空
+    std::cout << (fn == nullptr) << std::endl; // 这不是一个空的函数对象, 因此输出: 0
+
+    // 一个空的函数对象可以直接由空指针构造或赋值得来
+    fn = nullptr;
+    std::cout << (fn == nullptr) << std::endl; // 输出: 1
+
+    // 也可以由默认构造得来
+    std::function<int(int, int)> hn; // 默认构造
+    // nullptr 也可以放在比较算符的左侧
+    std::cout << (nullptr == hn) << std::endl; // 输出: 1
+    std::cout << (nullptr != hn) << std::endl; // 输出: 0
+
+    return 0;
+}
+```
+
+显然, 如果一个 `function` 对象为 "空" 的状态, 那么使用它的 `operator()` 会产生问题. 在 STL 中的规定是, 这样一个调用会抛出 `std::bad_function_call` 异常. 如果要检查函数对象是否为空, 除了上述使用与 `nullptr` 的比较之外, 更简单的方式是使用其隐式 `operator bool` 重载, 直接将函数对象放入 `if` 条件中. 如
+
+```
+std::function<int(int, int)> fn(sum_square);
+
+// ...
+
+if (fn) {
+    // 已确认函数对象不为空, 可以正常调用之
+    fn(1, 2);
+}
+```
+
+= 实现技巧
+
+以上介绍用法的各个例子中体现出, `function` 的实例可以从各种各样的可调用对象转化而来, 并且这种转化很可能不是内部存储了一个可调用对象的引用, 因为从 `function` 对象复制出的副本之间是独立的. 那么, 究竟这样简单而通用的接口之下藏着怎样玄妙的设计与实现呢? 现在就来一窥其中的机巧.
+
+首先是 `function` 模板的签名. 这种函数签名形式的特化类型并不是 C++11 才有的, 然而非常少见, 并且只在 C++11 中可以定义可变参数模板的形式. 以下的代码在 C++03 标准下也可以编译通过 (不加 `-std=c++0x` 选项)
+
+```
+template <typename _>
+struct Map;
+
+template <typename K, typename V>
+struct Map<K(V)> // 使用圆括号语法的偏特化
+    : std::map<K, V>
+{};
+
+int main()
+{
+    Map<std::string(int)> m;
+    m["jan"] = 1;
+    m["feb"] = 2;
+    std::cout << m["feb"] << std::endl; // 2
+    return 0;
+}
+```
+
+实际上在 `function` 实现中能看到的 C++11 新特新只有可变参数模板, 也就是其模板参数 `_ArgTypes` 类型参数包而已.
+
+`function` 实例可以在任何时候被改变为任何形式的函数指针或对象, 还能支持对内含对象的复制行为, 要做到这一点就需要在存储可调用对象数据之外, 加上区分类型的行为.
+
+函数对象可能的类型千千万万, 而且 lambda 之前没有继承关系, 因此不能使用 `dynamic_cast`. 虽然可以利用堆空间存储, 但需要使用或复制或析构时, 应当如何取得相应的类型信息, 这是 `function` 实现的一个挑战.
+
+以下代码将从如何存储和调用不同的函数对象入手, 给出实现上述行为的一种参考.
+
+```
+template <typename R, typename... Args>
+class function<R(Args...)>
+{
+    void* functor_ptr; // 由于无法确定函数对象的具体类型, 就用 void* 保存
+
+    // 并利用以下模板函数转换类型
+    template <typename Functor>
+    static Functor& get_functor(void* p)
+    {
+        return *static_cast<Functor*>(p);                            // (c)
+    }
+
+    // 定义一个函数指针, 当需要调用函数对象时, 从此函数指针上调用
+    using invoke_fn_t = R(*)(void*, Args&&...);
+    invoke_fn_t invoke_f;
+    // 它将以下面这个函数的特化作为有效值
+    template <typename Functor>
+    static R invoke_functor(void* p, Args&&... args)
+    {
+        return get_functor<Functor>(p)(std::forward<Args>(args)...); // (b)
+    }
+public:
+    // 对外暴露的函数调用算符重载
+    R operator()(Args&&... args)
+    {
+        // 检查是否为空, 并在为空时抛出异常
+        // if (!this->invoke_f) throw bad_function_call("function is null");
+        return this->invoke_f(this->functor_ptr, std::forward<Args>(args)...);
+    }
+
+    // 从函数对象构造
+    template <typename Functor>
+    function(Functor f)
+    {
+        this->invoke_f = invoke_functor<Functor>;                    // (a)
+        this->functor_ptr = new Functor(f);
+    }
+
+    // 允许隐式从 nullptr 转换构造, 此构造函数没有 explicit
+    function(std::nullptr_t = nullptr)
+        : invoke_f(nullptr)
+    {}
+};
+```
+
+来看看其中的几个重点. 在 (a) 处用参数类型 `Functor` 特化了 `invoke_functor` 函数并赋值给了 `invoke_f` 成员. 对 `invoke_functor` 的特化还造成了一串链式特化, 也就是在 (b) 处同时特化了 `get_functor` 函数, 因此在 (c) 处 `static_cast` 就会正确地转换得到对应的函数对象类型. 当然, 记得在 (a) 处之后要将函数对象给存到 `functor_ptr` 里去. 藉由这种方式, `function` 对象实际上 "记住" 了 `Functor` 类型.
+
+当然仅仅存储函数对象和重新拿出来调用肯定不够, 有 `new` 而没有相应的 `delete`, 内部存储的函数对象是会泄漏的; 此外还需要正确处理函数对象的复制行为. 下面就加上这两种行为的实现
+
+```
+template <typename R, typename... Args>
+class function<R(Args...)>
+{
+    void* functor_ptr;
+
+    template <typename Functor>
+    static Functor& get_functor(void* p)
+    {
+        return *static_cast<Functor*>(p);
+    }
+
+    using invoke_fn_t = R(*)(void*, Args&&...);
+    invoke_fn_t invoke_f;
+
+    template <typename Functor>
+    static R invoke_functor(void* p, Args&&... args)
+    { return get_functor<Functor>(p)(std::forward<Args>(args)...); }
+
+    // 增加用于删除和复制函数对象的函数指针成员, 它们的实现方式与 invoke_f 相似
+    using destroy_fn_t = void(*)(void*);
+    destroy_fn_t destroy_f;
+    using clone_fn_t = void(*)(void*&, void*);
+    clone_fn_t clone_f;
+
+    template <typename Functor>
+    static void destroy_functor(void* p)
+    {
+        delete &get_functor<Functor>(p); // 同样内部 "记住" Functor 类型, 这样可以正确转换类型并删除
+    }
+
+    template <typename Functor>
+    static void clone_functor(void*& p, void* other_p)
+    {
+        // 请注意参数 p 是引用传入的
+        p = new Functor(get_functor<Functor>(other_p)); // "记住" Functor 类型以便复制函数对象
+    }
+public:
+    R operator()(Args&&... args)
+    { return this->invoke_f(this->functor_ptr, std::forward<Args>(args)...); }
+
+    function(std::nullptr_t = nullptr)
+        : invoke_f(nullptr), destroy_f(nullptr), clone_f(nullptr)
+    {}
+
+    template <typename Functor>
+    function(Functor f)
+    {
+        this->invoke_f = invoke_functor<Functor>;
+        // 同样的手法, 特化这两个函数并赋值给相应函数指针成员
+        this->destroy_f = destroy_functor<Functor>;
+        this->clone_f = clone_functor<Functor>;
+
+        this->functor_ptr = new Functor(f);
+    }
+
+    // 复制构造时, 先将相应的函数指针都原样复制
+    function(function const& rhs)
+        : invoke_f(rhs.invoke_f)
+        , destroy_f(rhs.destroy_f)
+        , clone_f(rhs.clone_f)
+    {
+        if (this->invoke_f) {
+            // 在复制来源不为空时, 将复制来源的相应函数对象复制构造到自身的存储区中
+            this->clone_f(this->functor_ptr, rhs.functor_ptr);
+        }
+    }
+
+    // 析构时删除掉函数对象
+    ~function()
+    {
+        if (this->destroy_f) {
+            this->destroy_f(this->functor_ptr);
+        }
+    }
+};
+```
+
+那么这样实现的 `function` 在面对各种各样不同函数对象都能正常使用了. 上面实现中还缺少移动构造函数, 赋值算符重载, 读者可以自行尝试实现它们.
+
+不过, 除了可用, 实际上 `function` 还要考虑更多效率上的问题, 比如以函数指针构造或赋值的话, 不必分配堆空间, 赋值给 `void* functor_ptr` 就行了, 并相应地实现一族与 `invoke_functor`, `clone_functor` 等相似的函数将 `void* functor_ptr` 转换为函数指针加以利用; 以及还有一类优化: 如果一个函数对象的尺寸小于指针的大小, 那么也不需要分配堆空间, 而可以将函数对象直接构造在指针所占有的空间上 (利用 placement new).
+
+在 `function` 实现中, 存储实际函数对象时使用 `void*` 而忽略其原有类型, 相应地类型相关代码由几个模板函数批量生成, 这个技巧也被称作类型擦除 (type erasure).
+
+如果单单从 `invoke_functor` 的视角来看, 这个技巧的运用包括
+
+```
+template <typename Functor>
+static R invoke_functor(void* data, Args&&... args)
+{
+    return get_functor<Functor>(p)(std::forward<Args>(args)...);
+}
+
+// 实际由这两个函数根据 Functor 类型的不同而进行指针类型转换
+template <typename Functor>
+static Functor& get_functor(AnyData& data)
+{
+    return *static_cast<Functor*>(data.functor_ptr);
+}
+
+// ...
+
+template <typename Functor>
+function(Functor&& f)
+    : invoke_f(invoke_functor<Functor>)   // 每个 Functor 类型就特化一次
+    // ...
+{ /* ... */ }
+```
+
+每当有一个 `Functor` 类型可能被用以构造 `function` 实例时, 以上模板函数就会被特化一次, 相应地在目标代码中就会增加函数实现代码, 也因此最后链接得到的程序体积相应增大. 而透过这一表象, 其背后的本质相当于在用空间换取类型信息, 这些类型信息又不同于 RTTI, 它们是纯静态化类型转化.
+
+另外代码中有一处需要注意的是, 从函数对象构造时有一句
+
+```
+this->functor_ptr = new Functor(std::forward<Functor>(f));
+```
+
+等号右侧是一处复制构造. 这段代码能够成立意味着 `Functor` 类型必须是可复制的, 这也是标准中要求的. 因此, 如果一个函数对象只能支持移动语义而不能复制, 是无法与 `function` 配合使用的.
+
+```
+struct PtrHandle {
+    // PtrHandle 有 unique_ptr 作为成员, 因此不会隐式合成复制构造函数
+    std::unique_ptr<int> p;
+
+    void operator()() const
+    {
+        if (p == nullptr) {
+            std::cout << "I'm null" << std::endl;
+        } else {
+            std::cout << "I'm " << *p << std::endl;
+        }
+    }
+};
+
+int main()
+{
+    PtrHandle h;
+    std::function<void()> fn(std::move(h)); // 编译错误: h 不能复制构造
+                                            // 虽然 h 以移动方式交给 function 对象
+                                            // 但 function 对象内部仍然以复制方式将其构造至存储区
+    return 0;
+}
+```
+
+= 函数对象捕获引用失效陷阱
+
+当一个 `function` 对象在由另一个函数对象赋值时, 其原有的内在函数对象会被清理掉, 实现方式可能如下
+
+```
+template <typename Functor>
+function& operator=(Functor f)
+{
+    if (this->destroy_f) {
+        this->destroy_f(this->functor_ptr); // 如果之前存储的是一个函数对象, 先清理之
+    }
+
+    this->invoke_f = invoke_functor<Functor>;
+    this->clone_f = clone_functor<Functor>;
+    this->destroy_f = destroy_functor<Functor>;
+
+    this->clone_f(this->functor_ptr, &f);
+    return *this;
+}
+
+function& operator=(function const& rhs); // 复制赋值重载也会有类似清理行为
+```
+
+此时如果原有的函数对象捕获了反过来引用了该 `function` 对象的其他对象, 那么不适当的赋值可能引起问题.
+
+作为一个例子, 以下是用于解析字符串字面量的一个自动机实现, 解析从开始的双引号之后, 直到结束的双引号的输入. 但这个实现有一些问题
+
+```
+class StringLiteralAutomation {
+    std::string literal;
+    bool finished_;
+    std::function<void(char)> next; // 遇到下一个字符时应该做什么, 由此函数对象决定
+
+    void initial_state(char ch)
+    {
+        switch (ch) {
+        case '"':                            // 遇到双引号, 字面量结束
+            this->finished_ = true;
+            return;
+        case '\\':                           // 遇到反斜线, 进入转义状态
+            this->next = [this](char escaping)
+            {
+                this->next = [this](char ch) // 重置 next 到初始状态
+                {
+                    this->initial_state(ch);
+                };
+                switch (escaping) {          // 转义接下来的一个字符
+                case 't':
+                    this->literal += '\t';
+                    break;
+                case 'n':
+                    this->literal += '\n';
+                    break;
+                case '\\':
+                    this->literal += '\\';
+                    break;
+                case '"':
+                    this->literal += '"';
+                    break;
+                default:
+                    // 不合法的转义, 错误处理
+                    // throw "unknown escape";
+                };
+            };
+            return;
+        default:
+            this->literal += ch;             // 默认情况, 添加该字符
+        }
+    }
+public:
+    bool finished() const
+    {
+        return this->finished_;
+    }
+
+    std::string const& get_literal() const
+    {
+        return this->literal;
+    }
+
+    // 遇到下一个字符, 转调 next 函数对象
+    void next_char(char ch)
+    {
+        this->next(ch);
+    }
+
+    StringLiteralAutomation()
+        : finished_(false)
+    {
+        // 初始时 next 执行 initial_state, 不计起始的双引号
+        this->next = [this](char ch)
+        {
+            this->initial_state(ch);
+        };
+    }
+};
+
+int main()
+{
+    std::string input;
+    std::cin >> input; // 示例输入 hello, world"     (不会出错)
+                       // 或者输入 hello, \"world\"" (可能会出错)
+
+    StringLiteralAutomation a;
+    for (size_t i = 0; i < input.size() && !a.finished(); ++i) {
+        a.next_char(input[i]);
+    }
+    std::cout << "Input string finished? " << a.finished() << std::endl;
+    std::cout << "Literal is " << a.get_literal() << std::endl;
+    return 0;
+}
+```
+
+只看这个例子的结构的话, 会发现使用 `function` 实现状态自动机很省事, 只需要设定一个 `function` 成员, 在需要时更换此成员的函数对象即可. 而对外暴露的状态跳转行为只需实现为该函数对象调用的代理即可.
+
+当然, 前提是, 更换函数对象的时机要恰当. 上面的例子中就有一个不恰当的更换时机, 它在
+
+```
+void initial_state(char ch)
+{
+    // ...
+
+    this->next = [this](char escaping)  // a
+    {
+        this->next = [this](char ch)    // b
+        {
+            this->initial_state(ch);
+        };
+        switch (escaping) // ...
+            this->literal += // ...     // c
+    };
+
+    // ...
+}
+```
+
+上述代码的 (b) 处.
+
+在 (a) 处定义的这个 lambda 捕获了上下文中的 `this`, 赋值给 `next` 之后, `next` 内也间接包含了这个 `this` 的副本.
+
+下一次调用 `next` 执行到 (b) 处, 重新定义了一个 lambda 并赋值给 `next`, 之后 switch 语句内的某个 (c) 处又使用 `this`. 这时 (c) 处的 `this` 是无效的, 引用其 `literal` 成员就是未定义行为. 准确地说, 存储 `this` 值的地址空间失效了. 如果编译器生成的代码中, 执行 (a) 处定义的 lambda 的函数体时恰好一直将捕获的 `this` 值放在寄存器内, 程序运行就没问题, 否则下次去取得 `this` 的值时就会发生错误.^[[也有别的可能, 比如存储新 lambda 对象的堆空间恰好重用刚刚析构的 lambda 对象, 而两者大小一致, 因为都只捕获了 `this`, 这种重叠发生时也不会出错. 实际测试用 clang 3.4 编译运行上述示例不会发生错误; gcc 4.8 编译生成的程序运行时往往不会立即崩溃, 但使用 valgrind 工具可以看到不合法的内存访问. 这些行为差异并不体现编译器的优劣, 它就是未定义行为.]]
+
+要解释这种行为还要回到 lambda 的原理上. 在 (a) 处定义的 lambda 捕获了 `this`, 会将其存储在自身地址空间内, 在其函数体内能使用 `this` 的前提条件就是该 lambda 自身的地址空间是合法有效的. 那么该 lambda 何时失效呢? 就是在 (b) 处赋值时. 既有的 lambda, 也就是正在执行的这个函数体的所有者, 失效后, 并不会影响函数体的执行, 任何编译器都会把函数内容单独编译到代码空间里去, 只不过之后引用 `this` 都有可能是已失效的引用.
+
+解决这个问题的手段当然不少, 最简单的是将 (b) 处的赋值放到函数最后去, 这样函数体内其他引用 `this` 就不会失效了. 还有一种方法是将 `this` 的值复制一份到函数体栈区内
+
+```
+this->next = [this](char escaping)
+{
+    auto self = this;               // 将捕获的 this 的值提前赋给栈区变量
+    self->next = [self](char ch)
+    {
+        self->initial_state(ch);
+    };
+    switch (escaping) {
+    case 't':
+        self->literal += '\t';      // 之后引用的都是这个栈区变量的值, 即使 this 失效了也无妨
+        break;                      // 这种写法除了看起来有点像 Python 也并无不可
+    // ...
+    };
+};
+```
+
+然而, 即使解决了这个问题, 上述例子中还有另一个更难解决的问题, 就是 `StringLiteralAutomation` 类型实质上不可以复制, 甚至也无法移动构造.
+
+将 `main` 函数修改为这段测试代码便可发现重现这个缺陷
+
+```
+int main()
+{
+    std::string input;
+    std::cin >> input;
+
+    StringLiteralAutomation copy;                                // 另外创建一个自动机对象
+    StringLiteralAutomation a(copy);                             // a 由该对象复制构造得到
+    for (size_t i = 0; i < input.size() && !a.finished(); ++i) { // 输入操作仍然对 a 进行
+        a.next_char(input[i]);
+    }
+    std::cout << "Input string finished? " << a.finished() << std::endl;
+    std::cout << "Literal is " << a.get_literal() << std::endl;  // 但输出时会发现 a 中的字符串是空的
+
+    std::cout << std::endl << "Print information of the copy source" << std::endl;
+    std::cout << "Input string finished? " << copy.finished() << std::endl;
+    std::cout << "Literal is " << copy.get_literal() << std::endl; // 实际上内容都在被复制的对象内
+    return 0;
+}
+```
+
+肇因并不难发现, 因为在自动机类型复制构造时, `function` 对象内的 lambda 绑定的 `this` 也被原封不动地复制过来了, 两个 lambda 对象的 `this` 实际上都指向的是初始构造的 `copy` 对象, 结果对 `a` 进行操作实际上就等同于对 `copy` 进行操作.
+
+在这段测试代码里, 姑且还只是让一个对象成为另一个对象的傀儡. 实际代码中, 有可能这种对象复制后原对象被析构掉, 再使用时程序就崩溃了. 本质上这是 lambda 的缺陷, 但因为 lambda 并不会被显式复制, 只有被包装到 `function` 对象里, 问题才会显现出来, 所以这应该被看作是 `function` 的一种误用.
+
+如果一个函数对象捕获了 `this`, 同时该函数对象又是 `this` 的一个直接或间接的成员, 这种设计本身就触及了循环依赖的雷区. 这时应当修改设计不让函数对象捕获 `this`, 而是将 `this` 也作为参数传递给函数对象.
+
+实际上, 最直接地实现上述功能的方式就是使用 `function` 包装成员函数, 然后在使用时再传入 `this`. 如
+
+```
+class StringLiteralAutomation {
+    std::string literal;
+    bool finished_;
+    std::function<void(StringLiteralAutomation*, char)> next;
+    //                 ^^^^^^^^^^^^^^^^^^^^^^^^ 增加参数为此类型对象指针
+
+    void escape_state(char ch)                                   // 将 lambda 修改为成员函数
+    {
+        this->next = &StringLiteralAutomation::initial_state;    // 让 next 使用 initial_state
+
+        switch (ch) {
+            // ...
+        };
+    }
+
+    void initial_state(char ch)
+    {
+        switch (ch) {
+        case '\\':
+            this->next = &StringLiteralAutomation::escape_state; // 让 next 使用 escape_state
+            return;
+        // ...
+        }
+    }
+public:
+    // ...
+
+    void next_char(char ch)
+    {
+        // 调用 next 时, 传入 this
+        this->next(this, ch);
+    }
+
+    StringLiteralAutomation()
+        : finished_(false)
+        , next(&StringLiteralAutomation::initial_state)          // 初始化为 initial_state
+    {}
+};
+```
+
+不过使用 `function` 去包装成员函数指针显然是牛刀杀鸡, 无论是空间效率还是运行效率都不如直接使用函数指针类型.

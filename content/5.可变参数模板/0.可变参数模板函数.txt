@@ -1,0 +1,351 @@
+可变参数这一特性, 早在 C 语言中就有了, 可变参数函数这一特性, 在 C 语言悠久的发展历史中, 实际上是很早就引入的一项特性, 这跟 C 的编译特性有关系. 早期的 C 语言并不支持前置函数声明, 而编译器在处理到没有定义过的函数调用时, 会假定该函数返回整型 (`int`) 并且接受不定个数个整型参数, 并按照这样的规则生成参数入栈和返回的代码, 因此 C 几乎天生支持这个看起来很复杂的语言特性.
+
+其中最典型的运用当属与 C 语言标准 IO 的一族函数, 如
+
+```
+int printf(char const* format, ...);
+int scanf(char const* format, ...);
+```
+
+而作为 C++11 中新加入的**可变参数模板** (variardic template) 特性中的一个方面, **可变参数模板函数**当然不是 C++ "天生" 支持的特性, 它的设计是利用 C++ 中原本支持的重载机制和泛型函数机制来实现构造可以接受任意多个泛型参数的函数. 比如
+
+```
+template <typename T, typename... More>      // typename 之后加上省略号 (...) 表示这是可变参数模板
+void print(T const& t, More const&... more); // 相应地在泛型参数类型后也加上省略号
+```
+
+虽然也使用了省略号这一词法元素, 但它与 C 中的可变参数函数的机制不同. 实际上, 声明了以上函数, 等价于声明了这样一组不同参数个数的泛型函数重载
+
+```
+template <typename T>
+void print(T const& t);                                      // More 参数个数为 0
+
+template <typename T, typename More0>
+void print(T const& t, More0 const& more0);                  // More 参数个数为 1
+
+template <typename T, typename More0, typename More1>
+void print(T const& t, More0 const& more0, T2 const& more1); // More 参数个数为 2
+
+// ... 任意多个这样的重载
+```
+
+每个参数的类型都是泛型类型, 而不是默认为是整数, 或由用户自己从固定参数中推定得出, 因此相对于 C 的可变参数函数, 这一机制也有更好的类型安全性.
+
+= 运用与实现
+
+可变参数模板函数的运用通常都是对某种允许有任意多个参数的行为的建模, C 语言在这个方面用得最多的是格式化输入输出, 那么作为一个简化的例子, 不妨来考虑一个需求: 输出任意多个 (至少一个) 对象, 以逗号分隔它们, 而不需要考虑格式化输出. 如以下的调用所示
+
+```
+print(0);                             // 输出: 0
+
+int const x = 10;
+std::string msg("A quick brown fox");
+print(x, msg, 3.14);                  // 输出: 10, A quick brown fox, 3.14
+print(msg, "and a lazy dog", &x);     // 可能的输出: A quick brown fox, and a lazy dog, 0xffefffc4c
+
+print();                              // 无法编译
+```
+
+从以上示例也可以看出, 每个传递给 `print` 的参数的类型也可以是任意类型的, 这与 STL 算法库中实现迭代, 累加, 变换等需求的函数有本质区别. STL 算法函数都是从给定的迭代区间中获取参数, 而这些参数都有同样的类型, 这一点与可变参数模板函数要达成的目的不同.
+
+因此, 要实现以上的需求, 需要引入的函数不仅仅是接受任意个参数的函数, 而且所有这些参数都是泛型参数. 此函数的声明在本节开始的时候给出了
+
+```
+template <typename T, typename... More>
+void print(T const& t, More const&... more);
+```
+
+现在介绍其中各部分的含义. 此模板函数的声明中有两个 `typename` 但其接受的模板参数是至少 1 个. 这就是因为第二个 `typename` 之后的省略号 `...` 表示此参数为一个类型**参数包** (parameter pack). 参数包指的是从**零个**到任意多个类型参数, 因此参数列表中的 `More const&... more` 指的是从 0 个到任意多个参数, 那么若要函数至少接受 1 个参数, 就需要在前面额外加上一个 `T const& t`.
+
+这两部分的位置不可颠倒, 也就是形式参数列表中参数包只能出现在列表最后. 但出现在 `template` 声明中的 `typename` 没有这个限制
+
+```
+template <typename T, typename... More>
+void print(More const&... more, T const& t); // 错误, 参数包应该放在参数列表最后
+
+template <typename... More, typename T>      // 将 typename... 放在模板声明的其他位置可以编译
+void print(T const& t, More const&... more);
+```
+
+函数的实现可以按照以下思路进行
+
+```
+template <typename T, typename... More>
+void print(T const& t, More const&... more)
+{
+    std::cout << t;             // 输出第一个对象
+    if (/* (a) more 代表的参数包内有多于 1 个参数 */) {
+        std::cout << ", ";
+        print(/* (b) 将 more 中的参数展开到此处作为实参, 以输出剩下的对象 */);
+    } else {
+        std::cout << std::endl;
+    }
+}
+```
+
+以上 (a) (b) 两处都需要用到可变参数模板的配套设施, 即以下 C++11 中新增的语法
+
+* (a) 用 `sizeof...(More)` 或 `sizeof...(more)` 得到参数包中的参数个数, 这是一个编译时常数
+* (b) `print(more...)` 将参数包 `more` 中的参数展开为 `print` 调用的实参
+
+将这些内容补充到上面实现中, 便是
+
+```
+template <typename T, typename... More>
+void print(T const& t, More const&... more)
+{
+    std::cout << t;
+    if (sizeof...(more) > 0) {
+        std::cout << ", ";
+        print(more...);
+    } else {
+        std::cout << std::endl;
+    }
+}
+```
+
+按照可变参数模板函数的逻辑, 以上代码实际上等价于编写了一族函数重载
+
+```
+template <typename T>
+void print(T const& t)
+{
+    std::cout << t;
+    if (0 > 0) {                // 没有 More 参数, sizeof...(more) 为 0
+        std::cout << ", ";
+        print();                // 展开时 print 就没有参数了
+    } else {
+        std::cout << std::endl;
+    }
+}
+
+template <typename T, typename More0>
+void print(T const& t, More0 const& more0)
+{
+    std::cout << t;
+    if (1 > 0) {                // More 参数个数为 1
+        std::cout << ", ";
+        print(more0);           // 展开时 print 有 more0 一个参数
+                                // 匹配上一重载
+    } else /* ... */
+}
+
+template <typename T, typename More0, typename More1>
+void print(T const& t, More0 const& more0, More1 const& more1)
+{
+    std::cout << t;
+    if (2 > 0) {                // More 参数个数为 2
+        std::cout << ", ";
+        print(more0, more1);    // 展开时 print 有 2 个参数
+                                // 匹配上一重载
+    } else /* ... */
+}
+
+// 更多参数的情况
+```
+
+简而言之, `print(more...)` 这个带有参数包的表达式, 就是编译器为用户将参数包中的参数填入函数调用的实参列表中. 当然还有一些较为复杂的情况, 将在下一节中详细说明.
+
+不过很遗憾的, 编译器会在 `print(more...)` 这一句报错, 提示给 `print` 函数提供了 0 个参数, 对应于第一个没有 `more` 参数的重载.
+
+虽然 `sizeof...` 求得的是编译时常数, 编译器应该能在编译时就优化并只选出条件分支语句其中一个路径, 不过这种优化的时机要晚于编译两个路径, 所以还未开始优化, 就会先给出编译错误.
+
+而正确的实现应当是另行提供一个仅 1 参数的重载, 来替代编译器生成的. 如下
+
+```
+template <typename T>
+void print(T const& t)      // 提供一个单独的重载, 处理没有 more 参数的情况
+{
+    std::cout << t;
+    std::cout << std::endl; // 只有一个参数的重载也包括了 sizeof...(more) == 0 时的分支路径
+}
+
+template <typename T, typename... More>
+void print(T const& t, More const&... more)
+{
+    std::cout << t;
+    std::cout << ", ";      // 只留下 sizeof...(more) > 0 的分支路径
+    print(more...);
+}
+```
+
+提供了这个重载后, 也同时将分支语句中的两个路径拆分到两个重载中去了, 换言之, 在后面一个重载中, 实现所表现出的逻辑是, `more` 中肯定有至少一个参数, 不可能是 0 个.
+
+这实际上也是可变参数模板的重载匹配规则所确保的. 当有给定个数个参数的重载提供时会被优先匹配, 所以在给 `print` 的参数只有 1 个时, 就会匹配前一个重载. 当然, 这有一个前提: 在后一个重载实现时, 应当先给出前一个重载的前置声明或实现, 否则后一个重载也不会知道当参数包个数为 0 时去匹配前一个重载了.
+
+下面是一个完整的例子.
+
+```
+#include <iostream>
+
+template <typename T>
+void print(T const& t)
+{
+    std::cout << t << std::endl;
+}
+
+template <typename T, typename... More>
+void print(T const& t, More const&... more)
+{
+    std::cout << t << ", ";
+    print(more...);
+}
+
+int main()
+{
+    print(0);
+
+    int const x = 10;
+    std::string msg("A quick brown fox");
+    print(x, msg, 3.14);
+    print(msg, "and a lazy dog", &x);
+    return 0;
+}
+```
+
+可以看出, 可变参数模板函数的实现实质上是不断对模板进行递归特化, 并逐渐减少参数包中参数数量, 最终耗尽参数包而得以匹配到更一般的非可变参数的重载来实现的, 也因此在实现可变参数模板函数时, 一般需要定义一个单独的重载来匹配参数包中参数个数为 0 的情形.
+
+而严格地讲, `print` 调用自身来 "**递归**" 实现的说法并不正确, 因为每次调用生成的特化函数都是不同的函数. 当后文中为了叙述方便, 仍然会说这样的模板函数或模板类型递归地调用自身, 或递归地特化自己来实现.
+
+这个例子也能展现出 C 中的可变参数函数和 C++11 的可变参数模板函数之间的本质区别. 对于 C 中的函数, 如标准 IO 中正统的 `printf`, 其参数的个数和类型都是从模式字符串推导出来的, 而可变参数模板函数的参数类型都是编译时可以确定的, 体现了模板函数更好的类型安全性. 而而其缺点也很典型, 就是不同类型的特化会生成不同的代码, 使程序体积增大, 不过在新世纪的今天, 为了代码的可维护性, 这应该也不算大问题了.
+
+= 重载决议
+
+如上面所说的, 当同时存在一个可变参数的重载, 和一个固定个数参数的重载时, 会优先适配后者, 如
+
+```
+template <typename T>
+void print(T const& t) { /* ... */ }
+
+template <typename T, typename... More>
+void print(T const& t, More const&... more) { /* ... */ }
+
+template <typename T, typename U, typename S>
+void print(T const& t, U const& u, S const& s) // 增加一个固定 3 参数的重载
+{
+    std::cout << "matches me, no further output" << std::endl;
+}
+
+int main()
+{
+    // ...
+    print(msg, "and a lazy dog", &x); // 输出 matches me, no further output
+    return 0;
+}
+```
+
+此外, 如果固定个数参数的重载同时也有固定的类型而非泛型类型, 那么与既有标准中的行为一样, 这些更精准的重载将在合适时被优先匹配.
+
+可变参数模板还有一种特别的重载: 更换参数包类型的引用形式
+
+```
+template <typename T>
+void print(T const& t) { /* ... */ }
+
+template <typename T, typename... More>
+void print(T const& t, More const&... more) // 参数包引用形式为 const 限定引用
+{
+    std::cout << t << " [C] ";              // 分隔符为 [C]
+    print(more...);
+}
+
+template <typename T, typename... More>
+void print(T const& t, More&... more)       // 参数包引用形式为非 const 限定引用
+{
+    std::cout << t << " [-] ";              // 分隔符为 [-]
+    print(more...);
+}
+
+int main()
+{
+    int const x = 10;
+    std::string msg("A quick brown fox");
+    print(x, msg, 3.14);                    // 输出: 10 [C] A quick brown fox [C] 3.14
+    print(x, msg);                          // 输出: 10 [-] A quick brown fox
+    return 0;
+}
+```
+
+从这个例子中可以看出, 如果加上一个非 `const` 限定引用的重载版本, 而且调用时参数包中的实参又恰好都是非 `const` 的左值, 那么也会遵循尽可能精准的规则匹配非 `const` 限定的版本. 当然这种做法并不建议, 而应该使用广义引用
+
+```
+template <typename T, typename... More>
+void print(T const& t, More&&... more)  // More 是模板参数类型, 因此这不是右值引用, 而是广义引用
+{
+    // ...
+}
+```
+
+实际情况中, 根据是否允许修改参数, 选择性地给出 `const` 限定引用或广义引用之一即可.
+
+= 可变个整数型常数模板
+
+除了可以在 `typename` 关键字之后加省略号表示多个类型参数之外, 整数类型参数的个数也可以是可变的. 如上面所说的
+
+```
+template <typename T, int... I> // 任意多个整数参数
+void func();
+```
+
+在自定义字面量后缀一节中提到的如下模板函数定义, 其中模板参数为 `char... ch`, `ch` 参数包中包含该字符串中每一个字符. 可通过如下方式实现之
+
+```
+#include <iostream>
+#include <gmpxx.h> // GMP 高精度数值库, 包括高精度整数类型 mpz_class 和高精度浮点数类型 mpf_class 等
+                   // 由于 gcc 4.5 以上版本依赖 GMP 库, 若正确安装了 gcc, 应该可以直接包含此头文件
+                   // 链接时, 需要增加 -lgmp -lgmpxx 参数
+
+template <char... ch>
+mpf_class operator "" _mf()
+{
+    // 将参数包展开到数组初始化列表中, 等价于 {ch0, ch1, ch2, /* ... */, 0}
+    // 末尾处的 0 表示 nul 字符, 换言之这一自定义字面量重载的模板参数中没有自带 nul 字符
+    char s[] = {ch..., 0};
+    return mpf_class(s);
+}
+
+/* 以上重载完全等价于下面的重载, 而 char const* 参数比可变模板参数要更容易使用
+   因此若不是要将 char... ch 中的字符常量当作编译时常量使用, 建议用以下重载
+mpf_class operator "" _mf(char const* s)
+{
+    return mpf_class(s);
+}
+*/
+
+int main()
+{
+    // 传给模板的字符参数包为 '1' 'e' '+' '1' '0' '0' '0' 共 7 个字符
+    std::cout << 1e+1000_mf / 100 << std::endl; // 输出为 1e+998, 超过 double 类型可表示的范围
+    return 0;
+}
+```
+
+= 类型约束
+
+最后需要提一下, 可变参数模板这一特性并没有 "可变参数但不是模板" 的形式. 比如, 需要可变个字符串作为参数, 不能写作
+
+```
+std::string concat_all(std::string const&... s);
+```
+
+这种情况下仍然只能写为泛型声明, 然后通过其他手段来验证参数类型是否满足条件. 比如最简单的做法, 利用 `is_convertible` 判定参数是否可以转换为 `string`
+
+```
+#include <type_traits> // is_convertible
+
+template <typename T, typename... U>
+void concat_all(T const& t, U&&... u)
+{
+    static_assert(
+        // C++11 中新加的泛型类型 is_convertible
+        // 用于确定其第一参数类型是否可以转换为第二参数类型
+        std::is_convertible<T, std::string>::value,
+        "not convertible to string");
+
+    // ...
+}
+```
+
+对可变参数模板函数的介绍就到此, 接下来将详细说明各种参数包, 也就是省略号在可变参数模板特性中的使用方式.
+
+在以上例子中, 代码中出现 `...` 表示这是一个省略号词法元素, 若是写成注释如 `/* ... */` 则表示这里有更多但不重要的或者任意的代码. 本书之后的代码部分也将沿用这种记法.

@@ -1,0 +1,309 @@
+先来看看几个移动语义运作的例子.
+
+```
+#include <iostream>
+#include <string>
+
+int main()
+{
+    std::string s0("hello, move semantic");
+    std::string s1(s0);                       // 仍然是复制构造
+    s1[7] = 'c';
+    s1[9] = 'p';
+    s1[10] = 'y';
+    std::cout << "s0 => " << s0 << std::endl; // hello, move semantic
+    std::cout << "s1 => " << s1 << std::endl; // hello, copy semantic
+                                              // 复制构造之后, 两者所控制的资源的地址空间是独立的
+
+    std::cout << std::endl << "000 MOVE CONSTRUCTION" << std::endl;
+    std::string s2(std::move(s0));
+    //             ^^^^^^^^^       以 move 后的 s0 临终值构造 s2 将会是 "移动构造" (move construction)
+
+    // 具体的原理之后会详细介绍, 这里先看看移动构造之后各个对象的状态
+    std::cout << "s0 EMPTY? " << s0.empty() << std::endl; // 1 : s0 在移动构造之后成了空字符串
+    std::cout << "s1 => " << s1 << std::endl;             // hello, copy semantic : s1 不变
+    std::cout << "s2 => " << s2 << std::endl;             // hello, move semantic : s2 接管了 s0 的内容
+
+    std::cout << std::endl << "111 MOVE ASSIGNMENT" << std::endl;
+    s0 = std::move(s1);
+    //   ^^^^^^^^^      将 move 后的 s1 赋值给 s0 将会是 "移动赋值" (move assignment)
+
+    std::cout << "s0 => " << s0 << std::endl;             // hello, copy semantic : s0 接管了 s1 的内容
+    std::cout << "s1 EMPTY? " << s1.empty() << std::endl; // 1 : s1 在移动构造之后成了空字符串
+    std::cout << "s2 => " << s2 << std::endl;
+    return 0;
+}
+```
+
+在这个例子中可以看到, 使用 `s0` 构造 `s1` 使用的仍然是复制构造, 复制之后修改 `s1` 不会对 `s0` 有任何影响; 而使用 `std::move(s0)` 产生 `s0` 的临终值, 用以构造 `s2` 后, `s0` 的内容就移交给了 `s2`, 因而变成了空字符串, 之后使用 `std::move(s1)` 给 `s0` 赋值也类似. 这就是移动构造或者移动赋值会产生的效果. 从此处亦可看出将转换左值表达式为右值引用类型的函数命名为 `move` 的原因, 而 "临终" 这一名字也很贴切地体现出了这一运行结果.
+
+以上例子从表面观察如此, 但并不能保证这些字符串所控制的堆空间没有真正复制过, 要确信这一点, 可以用其他 STL 容器, 比如 `vector` 来验证之
+
+```
+#include <iostream>
+#include <vector>
+
+// 探测复制行为的类型
+// 发生普通构造, 复制构造, 析构时, 都会输出一些信息
+struct CopyProbe {
+    int value;
+
+    explicit CopyProbe(int v)
+        : value(v)
+    {
+        std::cout << "Construct " << this << " value=" << this->value << std::endl;
+    }
+
+    CopyProbe(CopyProbe const& rhs)
+        : value(rhs.value)
+    {
+        std::cout << "Copy to " << this << " from " << &rhs
+                  << " value=" << this->value << std::endl;
+    }
+
+    ~CopyProbe()
+    {
+        std::cout << "Destruct " << this << " value=" << this->value << std::endl;;
+    }
+};
+
+int main()
+{
+                                                         // 以下为相应语句之后可能的输出
+    CopyProbe p0(0);                                     // Construct 0xffefffbe0 value=0
+    CopyProbe p1(1);                                     // Construct 0xffefffbf0 value=1
+
+    std::vector<CopyProbe> v0;
+    v0.reserve(10); // 预留一些空间, 避免追加元素时
+                    // 触发重新分配, 引起元素复制输出
+    v0.push_back(p0);                                    // Copy to 0x5c3a040 from 0xffefffbe0 value=0
+    v0.push_back(p1);                                    // Copy to 0x5c3a044 from 0xffefffbf0 value=1
+
+    std::cout << std::endl << "000 COPY CONSTRUCTION"
+              << std::endl;                              // 000 COPY CONSTRUCTION
+    std::vector<CopyProbe> v1(v0);                       // Copy to 0x5c3a0b0 from 0x5c3a040 value=0
+                                                         // Copy to 0x5c3a0b4 from 0x5c3a044 value=1
+    std::cout << "v0.size() " << v0.size() << std::endl; // v0.size() 2
+    std::cout << "v1.size() " << v1.size() << std::endl; // v1.size() 2
+
+    std::cout << std::endl << "111 MOVE CONSTRUCTION"
+              << std::endl;                              // 111 MOVE CONSTRUCTION
+    std::vector<CopyProbe> v2(std::move(v0));            //          (((没有输出)))
+    std::cout << "v0.size() " << v0.size() << std::endl; // v0.size() 0
+    std::cout << "v1.size() " << v1.size() << std::endl; // v1.size() 2
+    std::cout << "v2.size() " << v2.size() << std::endl; // v2.size() 2
+
+    std::cout << std::endl << "END" << std::endl;        // END
+    return 0;                                            // Destruct 0x5c3a040 value=0
+}                                                        // Destruct 0x5c3a044 value=1
+                                                         // Destruct 0x5c3a0b0 value=0
+                                                         // Destruct 0x5c3a0b4 value=1
+                                                         // Destruct 0xffefffbf0 value=1
+                                                         // Destruct 0xffefffbe0 value=0
+```
+
+从这个例子中可以看到, 在向 `v0` 中添加元素时, 还是会使用对象复制的方式将副本加入容器中; 使用 `v0` 构造 `v1` 时, 因为是复制构造, 所以 `v0` 中的两个元素各复制了一次, 输出了两行; 而之后使用移动构造的方式用 `v0` 构造 `v2` 时则没有输出, 说明移动构造时至少元素复制被避免了.
+
+= 右值引用与移动函数
+
+从代码表象上, 复制 `vector` 和移动 `vector` 的差别就在于是否对构造参数使用 `std::move` 这个函数. 这是 C++ 向前兼容的结果: 默认写法产生的行为仍然是复制, 确保以前的代码仍然可以正常工作. 而使用 `std::move` 只是为了产生一个右值引用类型.
+
+之前介绍过, 右值引用是 C++11 中新引入的一种针对函数返回的临时对象的引用, 或从一个非 `const` 左值引用上强行转化而来, 以匹配接受右值引用参数的函数重载. 当然, 构造函数重载和 `operator=` 算符重载也都算是函数重载. 那么, 若这些特别的函数有接受右值引用类型参数的重载, 在使用右值实参进行重载决议时就会产生上述效果. 而这些特别的函数, 在 C++11 中则被命名为**移动构造函数 (move constructor)** 和**移动赋值 (move assignment) 算符重载**.
+
+不难想象, 它们在 `vector` 中的声明应写作如下形式
+
+```
+struct vector {
+    vector(vector&& src);            // 移动构造函数
+    vector& operator=(vector&& src); // 移动赋值算符重载
+};
+```
+
+而其他类型的移动构造函数和移动赋值算符重载也类似.
+
+当使用左值表达式去调用某个有重载函数时, 那么将匹配的是左值引用的重载, 如上面例子中直接使用 `v0` 去构造 `v1`, 就会匹配到复制构造函数. 相对地, 如果需要匹配移动构造函数, 就需要产生一个右值引用类型去匹配移动构造函数.
+
+当然, 更典型的情况应该是针对临时对象的纯右值引用: 使用函数返回的临时对象去构造另一对象, 将优先匹配移动构造函数. 如下面这样的代码
+
+```
+std::vector<int> make_some_vector()
+{
+    std::vector<int> r;
+    // ...
+    return std::move(r);
+}
+
+int main()
+{
+    std::vector<int> s(make_some_vector());
+    // ...
+}
+```
+
+在 `make_some_vector` 函数内很明显地使用 `std::move` 作用于即将返回的对象 `r`, 那么将 `r` 传出毫无疑问是移动构造; 而在 `main` 函数中, 使用 `make_some_vector()` 调用得到的返回值, 也就是一个临时对象作为构造函数参数, 同样会匹配 `vector` 的移动构造函数. 即上面这样的代码不会产生任何 `vector` 的复制. 本章开头所谈到的那些问题至此已经完全解决了.
+
+对于那些没有定义移动构造函数的类型而言, 类似上述代码中以函数返回值作为构造参数的行为, 将仍然以复制构造函数作为备选匹配.
+
+那么移动行为要如何实现呢? 这一点不妨来看看标准库容器是如何实现的. 以下便选取 `vector` 的源代码作为范例.
+
+= `vector` 的存储结构与移动构造函数实现
+
+`std::vector` 也许是 STL 中最常用的线性容器. 它有非常好的尾端插入效率和极快的随机寻访能力, 适用于不少常见场景. 从这些特性上不难猜测 `vector` 是对动态可变数组的封装, 实际上也正是如此. 以下是 `vector` 的存储结构的一种实现
+
+```
+// bits/stl_vector.h:71
+// vector 的基类, 将 vector 中管理堆空间资源的部分剥离到此基类中
+template<typename _Tp, typename _Alloc>
+struct _Vector_base {
+    // :80
+    // vector 数据存储结构 _Vector_impl 定义
+    // 此内部类继承的 _Tp_alloc_type, 故也会被当作配置器使用
+    // 此内部类中只定义了无参构造函数, 而没有其他构造函数, 也不包含显式析构函数
+    // 这样做是为了让这个内部类非常单纯地仅仅处理数据元素
+    struct _Vector_impl 
+        : public _Tp_alloc_type
+    {
+        pointer _M_start;
+        pointer _M_finish;
+        pointer _M_end_of_storage;
+
+        // :86
+        // 在默认构造函数里, 仅仅是将三个指针都初始化为 0 (即 NULL)
+        _Vector_impl()
+            : _Tp_alloc_type()
+            , _M_start(0)
+            , _M_finish(0)
+            , _M_end_of_storage(0)
+        {}
+
+        // :95
+        // 从配置器类型引用构造, 仅初始化配置器部分
+        // 三个成员指针仍然是被设置为空
+        _Vector_impl(_Tp_alloc_type&& __a)
+            : _Tp_alloc_type(std::move(__a))
+            , _M_start(0)
+            , _M_finish(0)
+            , _M_end_of_storage(0)
+        {}
+
+        // ..
+    };
+
+    // :164
+    // 使用以上内部类作为成员
+    _Vector_impl _M_impl;
+
+    // ...
+};
+
+// :208
+// 以 protected 方式继承上述类型, 作为最终暴露给用户使用的 vector 模板
+template <typename _Tp, typename _Alloc = std::allocator<_Tp>>
+class vector
+    : protected _Vector_base<_Tp, _Alloc>
+{
+    // :232
+    typedef size_t size_type;
+
+    // :644
+    // 获取元素个数, _M_finish 与 _M_start 之差
+    // _M_start 标记了元素存储的开始位置
+    // _M_finish 标记了元素存储结束位置
+    size_type size() const _GLIBCXX_NOEXCEPT
+    {
+        return size_type(this->_M_impl._M_finish - this->_M_impl._M_start);
+    }
+
+    // :724
+    // 获取分配的存储容量, _M_end_of_storage 与 _M_start 之差
+    // _M_start 亦标记了分配的空间的开始位置
+    // _M_end_of_storage 标记了分配的空间结束位置
+    size_type capacity() const _GLIBCXX_NOEXCEPT
+    {
+        return size_type(
+            this->_M_impl._M_end_of_storage - this->_M_impl._M_start);
+    }
+
+    // ...
+};
+```
+
+从 `size()`, `capacity()` 的实现可以看出, 当有元素存储时, 这些成员所标记出的连续线性的 `vector` 存储结构大致如下
+
+:::
+            _M_finish ----.
+_M_start                  |             _M_end_of_storage
+   |                      V                 |
+   '->+---+---+---+---+---+---+---+---+<----'
+      | E | E | E | E | E | - | - | - |
+      +---+---+---+---+---+---+---+---+
+      | <---- size -----> |           | size() 求得的元素个数
+      | <-------- capacity ---------> | capacity() 求得的所分配的空间大小
+:::
+
+在观察了 `vector` 的存储结构之后, 现在就来看看 `vector` 是如何实现其移动构造函数的. 如之前所说, 大部分情况下用户从函数内返回一个 `vector` 对象并不希望它的内容被复制一份, 这个其实并不难做到, 代码如下
+
+```
+class vector
+    : protected _Vector_base<_Tp, _Alloc>
+{
+    // bits/stl_vector.h:217
+    // 基类的简洁的别名
+    typedef _Vector_base<_Tp, _Alloc> _Base;
+
+    // :327
+    // vector 移动构造函数定义
+    // 函数体并没有内容, 直接使用基类的移动构造函数即可
+    vector(vector&& __x) noexcept
+        : _Base(std::move(__x))
+    {}
+
+    // ...
+};
+
+struct _Vector_base {
+    // :142
+    // 在基类的构造函数中, 让 _Vector_impl 配置器的部分进行移动构造
+    // 这样构造之后, _Vector_impl 的三个成员指针都是空值
+    // 而数据部分并非传入 _Vector_impl 构造函数, 而是使用其 swap 函数
+    _Vector_base(_Vector_base&& __x)
+        : _M_impl(std::move(__x._M_get_Tp_allocator()))
+    {
+        this->_M_impl._M_swap_data(__x._M_impl);
+    }
+
+    struct _Vector_impl {
+        // :101
+        // 在上面 _Vector_base 移动构造函数中调用的 _M_swap_data 函数的定义如下
+        void _M_swap_data(_Vector_impl& __x)
+        {
+            std::swap(_M_start, __x._M_start);
+            std::swap(_M_finish, __x._M_finish);
+            std::swap(_M_end_of_storage, __x._M_end_of_storage);
+        }
+    };
+
+    // ...
+};
+```
+
+以上代码中可以看出 `vector` 的移动构造函数转调了其基类 `_Vector_base` 的移动构造函数, 后者的移动构造函数实现中, `_M_impl` 成员在初始化列表中使用的构造函数重载仅初始化了配置器部分, 这一点并不用太多关心, 而 `_M_impl` 的各数据部分仍然是全空, 也就是说此时负责数据结构的 `_M_impl` 仍然是一个空容器; 紧接着调用 `_Vector_impl::_M_swap_data` 函数, 此函数完成的工作一目了然: 三次 `std::swap` 将当前容器的指针与目标容器的指针值对换, 那么当前的 `_M_impl` 的内容就会是参数容器的数据, 而参数容器的数据则被交换为当前的, 而当前的容器数据在前面一步初始化时被设为空, 所以在移动构造结束后, 作为参数的容器会成为一个空的容器.
+
+由于右值引用类型的参数是一个可修改的引用类型, 在上面的代码中, 它的成员可以被用于 `swap` 交换. 实际上, 所有移动构造函数的实现原理都是修改来源参数, "窃取" 其中的资源为自身所用, 而让来源参数进入 "空" 的状态. 不过请注意, 虽然在代码实现中移动构造通过交换两个容器的数据内容使得移动的来源回归到刚初始化的状态, 但标准中并不保证这一点, 而是规定作为移动来源的对象会进入一个可用但不确定的状态, 在下一次使用之前, 须调用容器的 `clear()` 函数重置其状态, 或对其进行赋值. 一般而言, 最好不要再使用它.^[[以交换成员的方式实现移动构造函数, 甚至也不是最优的方式. 考虑到 `swap` 的实现, 每交换一对成员需要三次赋值, 并不经济.]]
+
+另外需要注意的是, 如果使用 `auto` 类型推导从右值初始化对象, 那么会优先调用移动构造函数, 并且定义出对象类型, 而非右值引用类型. 比如
+
+```
+std::vector<int> create_vector() { return std::vector<int>{23, 29, 31, 37}; }
+
+int main()
+{
+    auto x = create_vector();            // x 类型为 vector<int>, 从临时对象移动构造
+    std::cout << x.size() << std::endl;  // 4
+
+    auto y = std::move(x);               // y 类型为 vector<int>, 从 x 移动构造
+    std::cout << x.empty() << std::endl; // 1 : 作为移动来源的 x 失去其中元素的控制权
+    std::cout << y.size() << std::endl;  // 4 : 这些元素全部转交给 y
+    return 0;
+}
+```

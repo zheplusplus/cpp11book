@@ -1,0 +1,345 @@
+C++11 除了利用可变参数模板机制实现了 `function` 类型之外, 还吸收了 Boost 库中的 `bind` 函数, 以及通常会与之一同使用的参数占位符. 使用 `bind` 的动机可能多种多样, 比如函数实参不是一次凑齐, 而是分两次给出, 那么可以利用 `bind` 先存储其中一部分实参; 先绑定部分参数后, 可以提供不同的其他实参, 反复调用 `bind` 得到的函数对象, 达到套接实际可调用对象的作用.
+
+= 基本用法
+
+`bind` 模板函数的参数也包括一个可调用对象, 并且返回另一个可调用对象, 但它与 `function` 设计上不同的是, 它并不着眼于对各种不同的可调用对象进行包装, 而是为了将参数可调用对象和一部分实参存储在一起, 之后用户提供剩下的实参时再实际调用.
+
+举个简单的例子
+
+```
+#include <functional> // bind 和占位符也都位于此头文件中
+#include <iostream>
+
+int add_mul(int a, int b, int c)
+{
+    return (a + b) * c;
+}
+
+int main()
+{
+    using namespace std::placeholders;                   // std::placeholders 中定义了若干个占位符
+    auto sum_and_triple = std::bind(add_mul, _1, _2, 3); // 这些占位符的名字就像这里用到的 _1 _2
+                                                         // _3 _4 ... _29
+    std::cout << sum_and_triple(4, 5) << std::endl;      // 27
+    return 0;
+}
+```
+
+其中 `bind` 的参数一共有 4 个, 第一个 `add_mul` 是可调用对象, 这个可调用对象调用时需要 3 个参数, 因此还需要额外的三个参数传给 `bind`. 例子中前两个参数是参数占位符 `_1`, `_2`, 占位符的作用是告诉 `bind` 这两个位置上的参数之后再传入; 最后一个非占位符实参 3 是绑定给此可调用对象作为第三个实参.
+
+```
+                           add_mul(int a, int b, int c)   实际调用 add_mul 需要 3 个参数
+                                       |      |      |
+sum_and_triple = std::bind(add_mul,   _1,    _2,     3)   利用 bind 绑定其中一个参数
+                                       |      |
+sum_and_triple                        (4,     5)          调用 sum_and_triple 传入剩余的 2 个参数
+```
+
+请注意, `_1`, `_2` 这些占位符指的是传给 `bind` 返回的可调用对象 `sum_and_triple` 的参数位置, 而不是原可调用对象 `add_mul` 的参数位置. 假如预绑定的实参是第一个参数, 那么接下来的占位符仍然应该是 `_1`, `_2` 而不是 `_2`, `_3`. 并且, 同一个编号的占位符还可以重复使用.
+
+```
+using namespace std::placeholders; 
+
+auto x = std::bind(add_mul, 10, _1, _2);
+std::cout << x(3, 4) << std::endl;           // 52 : (10 + 3) * 4
+                                             // x 的第一实参 3 会替换 bind 中的 _1
+                                             // x 的第二实参 4 会替换 bind 中的 _2
+
+auto time_6 = std::bind(add_mul, _1, _1, 3); // 实际调用 add_mul 时, 前两个参数会是相同的
+                                             // 此时 bind 给出的函数对象只需要 1 个参数即可调用
+std::cout << time_6(7) << std::endl;         // 42 : (7 + 7) * 3
+```
+
+默认情况下, 传入的预绑定参数都会以值的形式存储在 `bind` 返回的可调用对象中. 如果要绑定一个左值的引用, 同 `make_tuple` 一样使用退化复制规则, 需要用 `std::ref` 或者 `std::cref` 显式指出.
+
+```
+void incr(int& x, int delta) // 第一参数是引用
+{
+    x += delta;
+}
+
+int main()
+{
+    using namespace std::placeholders;
+    int lvalue = 0;
+
+    auto bind_by_val = std::bind(incr, lvalue, _1);           // 直接将 lvalue 传给 bind
+    bind_by_val(1);
+    std::cout << lvalue << std::endl; // 输出 0 : lvalue 的值传给了 bind 修改的是 bind 内部的副本
+
+    auto bind_by_ref = std::bind(incr, std::ref(lvalue), _1); // 使用 ref 传递 lvalue 的引用给 bind
+    bind_by_ref(2);
+    std::cout << lvalue << std::endl; // 输出 2 : 修改的会是被引用的 lvalue
+    return 0;
+}
+```
+
+但就上面这些简单的需求, 用 lambda 也可以实现, 而且可以做的更好
+
+```
+using namespace std::placeholders;
+int times = 3;
+auto sum_and_triple = std::bind(add_mul, _1, _2, times);
+
+auto x = [=](int __1, int __2)
+{
+    return add_mul(__1, __2, times);
+};
+
+std::cout << sizeof(sum_and_triple) << std::endl; // 16 : bind 有额外存储, 包括存储可调用对象
+std::cout << sizeof(x) << std::endl;              // 4  : lambda 只需要存储捕获的 int
+```
+
+所以很明显 `bind` 不是用来干这种工作的. 当然, `bind` 也有自己独有的功能. 在介绍 lambda 时说过, lambda 无法移动捕获上下文中的对象, 这一点对于 `bind` 来说不成问题. 例如
+
+```
+#include <fstream>
+#include <functional>
+#include <memory>
+
+struct Logger {
+    int const logger_id;
+
+    Logger()
+        : logger_id(0x123456)
+    {}
+
+    template <typename T>
+    void operator()(std::unique_ptr<std::ostream>& os, T const& t) // 泛型函数调用重载
+    {
+        *os << logger_id << ':' << t << std::endl;
+    }
+};
+
+int main()
+{
+    using namespace std::placeholders;
+
+    int some_data = 0;
+    std::unique_ptr<std::ostream> output(new std::ofstream("example.log"));
+    auto logger = std::bind(Logger(), std::move(output), _1); // bind 可以绑定不可复制的上下文对象
+
+    logger("the quick brown fox");
+    logger(some_data);
+    logger(&some_data);                                       // 可以用任何类型参数调用 bind 返回的函数对象
+    return 0;
+}
+```
+
+不过有些尴尬的是, 这段代码中展现的 `bind` 相对于 lambda 的两个优点, 在 C++14 标准中 lambda 的功能被增强后也都不存在了. 等价的 C++14 代码是这样的
+
+```
+std::unique_ptr<std::ostream> output(new std::ofstream("example.log"));
+
+auto logger =
+    [os = std::move(output), callable = Logger()] // 通用式捕获列表
+                                                  // 可以从上下文中移动捕获对象
+                                                  // 或构造对象作为作为 lambda 成员
+
+    (auto const& t)                               // 定义参数类型为 auto, 可以接受泛型参数
+
+    mutable
+{
+    callable(os, t);
+};
+
+logger("the quick brown fox");
+logger(some_data);
+```
+
+不过, 这也并不意味着, `bind` 只生存在 C++03 和 C++14 之间的这个夹缝中. 它仍然有一个重要的优势, 就是其给出的函数对象类型是可控的.
+
+关于 `bind` 返回的对象的类型有一点需要说明的是, 在 C++ 标准中不规定它返回的类型的具体名字, 而是由库的实现根据实际情况 (传入的函数对象类型和预绑定的实参类型) 给出. 这一点在 C++11 中有了自动类型推导后也不会造成不便. 所以可以结合 `decltype` 对 `bind` 的返回值提供一个类型别名, 这样就可以将此类型用于函数的返回值类型, 或类的成员类型了.
+
+```
+using namespace std::placeholders;
+using bind_fn_t = decltype(std::bind(std::declval<Logger>(),
+                                     std::unique_ptr<std::ostream>(), _1));
+// 可以定义 bind 返回的别名
+// 相比之下 lambda 不可以被放入 decltype 中
+// 即使可以 decltype, 不同的 lambda 之间不能互相赋值的规则仍会阻止下面的代码生效
+
+bind_fn_t file_logger(std::string const& filename) // 将定义出的类型用于函数返回值
+{
+    std::unique_ptr<std::ostream> output(new std::ofstream(filename));
+    return std::bind(Logger(), std::move(output), _1);
+}
+
+int main()
+{
+    int some_data = 0;
+    bind_fn_t logger(file_logger("example.log"));
+    logger("the quick brown fox");
+    logger(some_data);
+    logger(&some_data);
+    return 0;
+}
+```
+
+与 `function` 一样, `bind` 也可以用于绑定成员函数, 且同样其第一参数逻辑上应当是这个类型的实例. 要符合这一要求, 既可以在调用 `bind` 处传入一个对象引用或对象指针作为第一参数, 也可以在调用 `bind` 返回的函数对象时传入相应的对象或对象指针. 如
+
+```
+using namespace std::placeholders;
+
+int main(int argc, char** argv)
+{
+    std::string s;
+    std::string t("lazy dog");
+
+    // 调用 bind 时就传入实例参数, 传入指针
+    auto h = std::bind(&std::string::size, &t);
+    std::cout << h() << std::endl;              // 8
+
+    // 调用 bind 时就传入实例参数, 引用传入
+    // 允许传入指针是为了在成员函数中传入 this 来更方便地调用
+    // 在其他函数中调用时, 最好使用 reference_wrapper
+    auto m = std::bind(&std::string::size, std::cref(t));
+    std::cout << m() << std::endl;              // 8
+
+    // 调用 bind 时就传入实例参数, 复制或使用 std::move 移动传入
+    // 比只能使用对象指针的 function 更灵活, 在需要函数对象控制对象的生命周期时更安全
+    auto g = std::bind(&std::string::size, s);
+    std::cout << g() << std::endl;              // 0
+
+    auto f = std::bind(&std::string::size, _1);
+    std::cout << f(s) << std::endl;             // 0 : 输出 s.size()
+    std::cout << f(t) << std::endl;             // 8 : 输出 t.size()
+    std::cout << f(&s) << std::endl;            // 0 : 也可以使用指针
+    std::cout << f(&t) << std::endl;            // 8
+
+    // 绑定 string::clear 函数
+    // 绑定时给出对象左值, 会以复制方式存储一个副本在 bind 中
+    // 故这时调用 flush_copy 也只是清理掉 bind 内的副本的数据
+    auto flush_copy = std::bind(&std::string::clear, t);
+    flush_copy(t);
+    std::cout << t.size() << std::endl;         // 8 : 原来对象不受影响
+
+    // 如果留出参数位置, 之后调用时传入左值, 则相当于在该左值上调用此成员函数
+    auto flush_ref = std::bind(&std::string::clear, _1);
+    flush_ref(t);
+    std::cout << t.size() << std::endl;         // 0 : t 以左值方式传入并被清空数据
+    return 0;
+}
+```
+
+= 实参绑定与存储与传参
+
+在调用 `bind` 时, 会将函数对象和各预绑定的参数都存储在 `bind` 返回的函数对象中. 之后, 在调用 `bind` 返回的函数对象时, 会将这些预存储下来的实参 "传" 到实际函数对象对应的参数位置上去. 这就产生了一个小问题, 如果一个实参无法复制, 那么它要怎么传参呢? 例如
+
+```
+struct SumPtr {
+    std::unique_ptr<int> p; // SumPtr 含有只能移动构造的成员, 因此自身也只能移动构造
+
+    explicit SumPtr(int x)
+        : p(new int(x))
+    {}
+
+    void operator()(std::unique_ptr<int> q)
+    {
+        std::cout << *this->p + *q << std::endl;
+    }
+};
+
+int main()
+{
+    SumPtr s(2);
+    std::unique_ptr<int> q(new int(3));
+    // 两个只能移动构造的对象, 都必须转为右值才能传递 bind
+    auto f = std::bind(std::move(s), std::move(q));
+    std::cout << (q == nullptr) << std::endl;   // 输出 1 : q 在移动之后会变成空指针
+    std::cout << (s.p == nullptr) << std::endl; // 输出 1 : s.p 同理
+    // f(); 此处如果调用 f 会报错
+    return 0;
+}
+```
+
+上面例子中, 去掉 `std::bind(std::move(s), std::move(q))` 中的任何一个 `move` 都会报错, 因为 `bind` 需要将对象以实例形式存下来, 这就需要将参数构造到其内部; 若不加 `move` 就会使用复制构造, 这显然是不可行的. 然而, 这样即使能产生如 `f` 的预绑定对象, 却无法调用它, 否则会产生 `unique_ptr` 无法从 `bind` 产生的对象内部复制到参数位置导致的编译错误.
+
+补救的方法是使得 `SumPtr` 的函数调用算符重载相应参数位置接受一个引用, 那么存储在 `bind` 返回的对象内部的 `unique_ptr` 将以引用形式传给 `s`
+
+```
+struct SumPtr {
+    std::unique_ptr<int> p;
+
+    explicit SumPtr(int x)
+        : p(new int(x))
+    {}
+
+    void operator()(std::unique_ptr<int> const& q) // 更改参数为 const 左值引用
+    {
+        std::cout << *this->p + *q << std::endl;
+    }
+};
+
+int main()
+{
+    SumPtr s(2);
+    std::unique_ptr<int> q(new int(3));
+    auto f = std::bind(std::move(s), std::move(q));
+    f(); // 编译通过, 输出 5
+    return 0;
+}
+```
+
+而实际在项目中最可能遇到的难题是, 像 `SumPtr` 这样的可调用对象类型或函数签名的控制权并不在使用 `bind` 的开发者手中, 若是这样的话就必须再自行编写一个套接类型或套接函数了.
+
+除了实参对象无法复制可能导致的一些问题, 缓存的实参的类型与交给 `bind` 的原始可调用对象相应参数位置上的参数类型不同时也可能产生一些意料之外的行为. 比如给定
+
+```!
+void func(int x) { std::cout << x << std::endl; }
+double y = 3.14;
+
+auto g = std::bind(func, y);
+g(); // 输出 3
+```
+
+那么得到的 `g` 会把 `double` 类型的实参保存下来, 然后调用 `func` 时再把它适配为 `int`. 内建数值类型之间互相转换或许算不上什么问题, 但对于其他类型可能会大有不同. 比如, 若传给 `bind` 的函数对象的某个位置上的形参类型和预绑定的实参类型不符, 但可以隐式转换, 那么每次调用 `bind` 返回的函数对象时, 这种转换都会发生
+
+```
+struct A {
+    ~A()
+    {
+        std::cout << "~A" << std::endl;
+    }
+};
+
+struct B {
+    /* implicit */ B(A const&)
+    {
+        std::cout << "B(A const&)" << std::endl;
+    }
+
+    /* implicit */ B(A&&)
+    {
+        std::cout << "B(A&&)" << std::endl;
+    }
+
+    ~B()
+    {
+        std::cout << "~B" << std::endl;
+    }
+};
+
+void func(B x)
+{
+    std::cout << "func" << std::endl;
+}
+
+int main()
+{
+                                        // 输出
+    auto fn = std::bind(func, A());     // ~A          : 临时对象析构
+    std::cout << "bound" << std::endl;  // bound
+    fn();                               // B(A const&)
+                                        // func
+                                        // ~B          : func 形参析构
+    std::cout << "#0" << std::endl;     // #0
+    fn();                               // B(A const&) : 又一次从 A 转换到 B
+                                        // func
+                                        // ~B
+    std::cout << "#1" << std::endl;     // #1
+    return 0;                           // ~A          : fn 中存储的 A 析构
+}
+```
+
+以上是使用 `bind` 需要注意的问题. 在下一章介绍线程对象 API 时, 会看到有与 `bind` 的机制类似之处.

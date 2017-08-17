@@ -1,0 +1,205 @@
+在上一节的例子中参数包省略号出现在了三种不同的位置, 这也是参数包的三种语法形式. 分别是
+
+```
+// a. 出现在模板内关键字之后, 如
+
+  // 不定个数个类型
+  template <typename... T>
+  // 等价于声明如下的模板
+  template <typename T0, typename T1, typename T2, /* 任意多个参数 */>
+
+  // 不定个数个常数
+  template <int... N>
+  // 等价于声明如下的模板
+  template <int N0, int N1, int N2, /* 任意多个参数 */>
+
+  // 类似的, 不定个数个模板类型
+  template <template <typename> class... T>
+
+// b. 出现在类型上下文中, 如
+
+  template <typename... T>
+  void f(T&&... args);
+  // 等价于
+  template <typename T0, typename T1, typename T2, /* 任意多个 */>
+  void f(T0&& arg0, T1&& arg1, T2&& arg2, /* 相应的任意多个 */);
+
+// c. 出现在表达式上下文中, 如
+
+  template <typename... T>
+  void f(T&&... args)
+  {
+      g(args...);
+      // 等价于用逗号分隔拆开 args 包
+      g(arg0, arg1, arg2, /* 相应的任意多个 */);
+
+      // 注意, 并不等价于逗号运算符, 不能单独写出来是
+      // 如 g(0, (args..)) 是错误的写法, 其中 (args..) 并不会变成逗号分隔的表达式
+  }
+```
+
+头一种情形就像武术的起手式, 无论是可变模板函数还是可变模板类的开头必然都有它, 但变化并不多, 在模板声明时视情况写上即可.
+
+而类型上下文中的省略号则可用于任何可能出现任意多个类型的位置, 除了上一节中的例子里提到的直接以模板类型为各参数类型的 `print` 函数, 也包括如下这样的参数声明方式
+
+```
+template <typename... T>
+void g(std::vector<T>&&... args);
+// 等价于
+template <typename T0, typename T1, /* 任意多个 */>
+void g(std::vector<T0>&& arg0, std::vector<T1>&& arg1, /* 相应的任意多个 */);
+```
+
+那么这个 `g` 模板函数可以接受任意多个任意元素类型的 `vector` 对象参数. 需要注意的是, 上面这个写法跟下面的写法
+
+```
+template <typename... T>
+void g(std::vector<T...>&& args);
+```
+
+完全不同, 后面这种写法是将参数包展开为 `std::vector` 的模板参数
+
+```
+template <typename T0, typename T1, /* ... */>
+void g(std::vector<T0, T1, /* ... */>&& args);
+```
+
+如果这个参数包恰好只有一个参数, 或者恰好有两个参数且第二个参数又恰好是个 `allocator` 类型, 这个模板还姑且可以特化, 但其他情况就大错特错了.
+
+除了可以在形参列表中出现参数包, 在类型继承处也可以出现任意多个类型, 这似乎有点出乎意料, 但确实可以这么干
+
+```
+template <typename... T>
+class MyClass: public T...
+{
+    // ...
+};
+
+// 等价于
+
+template <typename T0, typename T1, /* ... */>
+class MyClass
+    : public T0
+    , public T1 // 所有继承访问限制均与第一个相同, 如这里都是 public 继承
+    /* ... */
+{
+    // ...
+};
+```
+
+当然一般并不会直接这么用, 且一旦参数包里有两个类型相同的参数, 或者有原生类型, 那么这种继承就无法编译. 故使用时需要一些技巧, 作为一个对可变模板参数继承的例子, 下一节将介绍 `std::tuple` 的实现方式.
+
+而表达式上下文中的参数包则花样更多一些, 参数包表达式可以带着表达式模式展开. 比如
+
+```
+template <typename... T>
+void f(T&&... args)
+{
+    // 原样展开
+    g(args...); // => g(arg0, arg1, /* ... */);
+
+    // 函数调用模式的展开
+    g(h(args)...); // => g(h(arg0), h(arg1), /* ... */);
+
+    // 运算模式的展开
+    g(args < value...); // => g(arg0 < value, arg1 < value, /* ... */);
+    // 如果是数值常数, 要加个空格以免省略号被当作小数点
+    g(args < 0 ...); // => g(arg0 < 0, arg1 < 0, /* ... */);
+
+    // 还可以将以上模式组合在一起
+    g(m(args) < n(value)...); // => g(m(arg0) < n(value), m(arg1) < n(value), /* ... */);
+}
+```
+
+理解这种模式展开不妨将省略号视作一个优先级非常低的后置算符, 然后将省略号之前的表达式当作模式展开参数包
+
+```
+template <typename... T>
+void f(T&&... args)
+{
+    g(h(args)...);
+//    ^^^^^^^ 省略号之前的表达式
+//  按此模式展开成
+    g(h(arg0), h(arg1), /* ... */);
+//    ^^^^^^^  ^^^^^^^
+
+    g(m(args) < n(value)...);
+//    ^^^^^^^^^^^^^^^^^^ 省略号之前的表达式, 省略号的 "优先级" 低于比较运算或任何其他算符
+//  按此模式展开成
+    g(m(arg0) < n(value), m(arg1) < n(value), /* ... */);
+//    ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+}
+```
+
+为了让代码更容易看明白, 可以给模式表达式额外加上一层括号, 以及加上额外的空格让代码显得更清晰, 比如上述最后一个例子可以写成
+
+```
+    g( ( m(args) < n(value) )... );
+```
+
+再举一例
+
+```
+// bits/vector.tcc:291
+// vector::emplace 函数实现
+// 置位式构造, 给定一个位置 (首参数) 在这个位置上构造元素
+template <typename... _Args>
+iterator emplace(iterator __position, _Args&&... __args)
+{
+    size_type const __n = __position - begin();
+    if (this->_M_impl._M_finish != this->_M_impl._M_end_of_storage
+            && __position == end())
+    {
+        _Alloc_traits::construct(this->_M_impl, this->_M_impl._M_finish,
+                                 std::forward<_Args>(__args)...);
+//                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        ++this->_M_impl._M_finish;
+    } else {
+        _M_insert_aux(__position, std::forward<_Args>(__args)...);
+//                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    }
+    return iterator(this->_M_impl._M_start + __n);
+}
+```
+
+构造参数是一组可变广义引用, 它们最终将被直接传递给元素的某个构造函数重载, 传递的过程当然要用到前文中提到的完美转发. 然而问题是如何完美转发一组任意多个参数呢? 答案就在这里, 以 `forward` 调用为模式展开参数包.
+
+需要注意的是, `forward` 的特化类型参数 `_Args` 是个类型参数包, 在这个模式里相应的类型和相应的值在同一个表达式中一同展开, 相当于以下代码. 这也可以视作一种 `forward` 的固定用法.
+
+```
+template <typename _Arg0, typename _Arg1, /* ... */>
+iterator emplace(iterator __position, _Arg0&& __arg0, _Arg1&& __arg1, /* ... */)
+{
+    // ...
+    _Alloc_traits::construct(this->_M_impl, this->_M_impl._M_finish,
+                             std::forward<_Arg0>(__arg0),
+                             std::forward<_Arg1>(__arg1),
+                             /* ... */);
+    // ...
+}
+```
+
+这种固定用法非常适合于这种场景: 某个函数仅处理一部分参数, 然后让所有其他参数都透过此函数传给另一个函数, 并且转发的参数的个数是不定的. 像上面的例子一样, 这一写法在 STL 中也被广泛使用, 各种容器在 C++11 中都添加了类似 API 支持置位式构造元素, 通过这样的函数入口提供构造参数, 容器内部在分配好的空间上再根据参数构造对象, 而避免了任何构造好的元素的复制或移动. 比如, `vector` 有 `emplace_back` API 支持在容器的末尾进行插入
+
+```
+struct Point {
+    int x;
+    int y;
+
+    Point(int xx, int yy)
+        : x(xx)
+        , y(yy)
+    {}
+};
+
+int main()
+{
+    std::vector<Point> pts;
+    // 以下两个调用的效果相同, 均为向 vector 末尾添加 x=2, y=3 的 Point 对象
+    pts.push_back(Point(2, 3)); // 使用 push_back 将已经构造的对象加入 vector 中
+    pts.emplace_back(2, 3);     // 使用 emplace_back 将用来构造 Point 的参数传入, 而无需直接构造对象
+    return 0;
+}
+```
+
+以上就是省略号的各种用法. 到此为止可变参数模板机制都以可变参数模板函数为例, 而接下来将介绍 C++11 中 STL 加入的可变参数模板类 `tuple` 的实现技巧.

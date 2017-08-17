@@ -1,0 +1,346 @@
+在 C++11 中引入了右值引用来针对临时对象, 但是作为向前兼容, `const` 限定的左值引用仍然可以通配所有引用类型. 不过在新标准中还引入了一个特殊规则, 使得一些泛型引用类型的参数也可以适配任何参数. 这种参数类型被称为**广义引用 (universal reference)** 类型.
+
+使用 `const` 限定的引用类型的缺点是, 无论实参是否为变量, 都因为加上了 `const` 限定而无法被修改了. 而引入广义引用要解决的问题, 就是保持各参数原有的状态.
+
+= 广义引用
+
+广义引用的基本规则是, 如果模板函数的某个参数为引用类型 `T&&`, 并且满足以下几个条件
+
+* 类型 `T` 是这个函数的模板类型参数
+* 类型参数没有被用户指定而是由编译器推导
+
+那么此参数类型 `T&&` 是广义引用, 而不是一个右值引用类型.
+
+广义引用类型的形参虽然语法上看起来像右值引用, 但它可以匹配任意类型的实参. 例如
+
+```
+template <typename T>
+void f(T&& t)   // 参数 T&& 中的 T 是模板函数 f 的模板类型参数
+{
+    std::cout << t << std::endl;
+}
+
+int main()
+{
+    f(0);       // 输出 0 : 可以匹配右值, 实际 T&& = int&&
+    int x = 1;
+    f(x);       // 输出 1 : 可以匹配左值, 实际 T&& = int&
+    int const y = 2;
+    f(y);       // 输出 2 : 可以匹配 const 左值, 实际 T&& = int const&
+    return 0;
+}
+```
+
+不得不说, 由于广义引用与右值引用的语法形式一样, 很容易就出现误解和误用. 比如以下两个很典型的例子, 其中出现的模板参数都**不是**广义引用, 因为它们违反了上述广义引用规则的第一条.
+
+```
+template <typename T>
+void g(std::vector<T>&& v);
+//     ^^^^^^^^^^^^^^^^ 非广义引用而是右值引用; 因为参数类型是 std::vector<T>, 它不是模板类型参数 T
+
+template <typename T>
+struct X {
+    template <typename U>
+    void f(T&& t, U&& u);
+    //     ^^^^^ T&& t 不是广义引用而是右值引用类型参数; 因为它不是函数的模板参数而是外层模板类的类型参数
+    //           U&& u 是广义引用
+};
+```
+
+而下面这个例子则演示了编译器是如何应用上述的第二条规则的
+
+```
+template <typename T>
+void f(T&& t) {} // 类型参数 T&& 定义上满足广义引用的条件
+
+int main()
+{
+    int i = 0;
+
+    f(i);        // 编译通过: 编译器认为 f 的参数是广义引用, 因此能够接受左值参数
+
+    f<int>(i);   // 编译失败: 由于用户指定了 T = int, 因此编译器认为 f 的形参类型是 int&& 右值, 无法接受左值实参
+                 // 即使函数在定义上满足广义引用的条件, 调用函数时也可能违反广义引用的条件
+    return 0;
+}
+```
+
+广义引用的一个直接应用就是在对参数没有具体类型要求的工具函数的场景. 比如用于将左值转换为临终值的 `std::move` 函数的参数就是一个广义引用. 其实现为
+
+```
+// bits/move.h:99
+template<typename _Tp>
+typename std::remove_reference<_Tp>::type&& move(_Tp&& __t) // 此类型是泛型参数, 因此是一个广义引用
+        noexcept // 这个简单的工具函数, 它不会抛出异常, 因此加上 noexcept 声明是有必要的
+{
+    // 使用 static_cast 将引用类型进行转换
+    return static_cast<typename std::remove_reference<_Tp>::type&&>(__t);
+}
+
+// type_traits:1373
+// remove_reference 可用于将任何引用类型还原成其值类型
+// 因此 move 的返回值类型就会是 _Tp 类型参数去掉引用符号之后再加上右值引用
+template<typename _Tp>
+struct remove_reference
+{
+    typedef _Tp type;
+};
+
+template<typename _Tp>
+struct remove_reference<_Tp&>
+{
+    typedef _Tp type;
+};
+
+template<typename _Tp>
+struct remove_reference<_Tp&&>
+{
+    typedef _Tp type;
+};
+```
+
+因此, 即使对一个右值使用了 `std::move` 也无妨, 其结果仍会被正确地当作一个右值对待.
+
+= 引用折叠
+
+在介绍广义引用基本语法时用了如下的例子
+
+```
+template <typename T>
+void f(T&& t) { std::cout << t << std::endl; }
+
+int main()
+{
+                     f(0); // T&& = int&&      : 匹配右值引用
+    int x = 1;       f(x); // T&& = int&       : 匹配左值引用
+    int const y = 2; f(y); // T&& = int const& : 匹配 const 限定左值引用
+    return 0;
+}
+```
+
+这样写注解有一个细节问题, 就是当 `T&& = int&&` 成立时, 是否意味着 `T = int` 的特化; 以及 `T&& = int&` 时, 特化类型又是什么. 在这里解释一下广义引用匹配参数时, 具体的引用推导规则.
+
+广义引用只可能匹配上述三个引用类型而不可能是值类型, 当广义引用匹配一个左值引用时, 推导出的类型实参为相应的左值引用类型; 而当广义引用类型匹配右值引用时, 推导出的类型实参则为相应的值类型, 即
+
+```
+f(0);            // T&& = int&&      <=> T = int
+int x = 1;
+f(x);            // T&& = int&       <=> T = int&
+int const y = 2;
+f(y);            // T&& = int const& <=> T = int const&
+```
+
+反过来看上面结论的话, 就会发现, 当 `T = int` 时意味着, `T&& = int&&`, 这一点没问题, 但 `T = int&` 时, `T&& = int&`, 右值引用符号去哪里了呢?
+
+这就是**引用折叠** (reference collapsing) 的效果. 在 C++ 中, 各种引用类型的叠加并不是做简单的数学运算, 用类型加上引用符号就得到相应的引用类型. 而引用类型相对于指针类型很大的一处不同也在于此: 存在指向指针的指针类型, 但不存在引用另一个引用的引用类型. 如
+
+```
+typedef int* int_ptr;
+int_ptr* x;           // x 的类型是 int**
+
+typedef int& int_ref;
+int_ref& y;           // y 的类型仍然是 int&
+```
+
+在这种情况下两个引用符号折叠在一起, 形成 `y` 的最终类型定义. 在 C++11 中加入了右值引用后, 引用折叠扩充成了以下三条规则
+
+* 定义左值引用类型的右值引用, 结果是左值引用; 即 `T&  && => T&`
+* 定义右值引用类型的左值引用, 结果是左值引用; 即 `T&& &  => T&`
+* 定义右值引用类型的右值引用, 结果是右值引用; 即 `T&& && => T&&`
+
+简而言之只有两个右值引用折叠在一起才会得出右值引用, 其他情况都会是左值引用. 写成代码示例就是
+
+```
+#include <iostream>
+#include <type_traits> // include is_lvalue_reference : 指出一个类型是否是左值引用
+                       //         is_rvalue_reference : 指出一个类型是否是右值引用
+
+int main()
+{
+    using int_lref = int&;
+    using int_rref = int&&; // 使用 using 定义两种引用类型的别名, 然后对别名加上引用符号
+                            // 可不能直接写 int& && 这样的类型
+
+    // 输出 1 0 : 折叠为左值引用
+    std::cout << std::is_lvalue_reference<int_lref&>::value << ' '
+              << std::is_rvalue_reference<int_lref&>::value << std::endl;
+
+    // 输出 1 0 : 折叠为左值引用, 附加上的右值引用符号失效
+    std::cout << std::is_lvalue_reference<int_lref&&>::value << ' '
+              << std::is_rvalue_reference<int_lref&&>::value << std::endl;
+
+    // 输出 1 0 : 折叠为左值引用, 原有的右值引用符号失效
+    std::cout << std::is_lvalue_reference<int_rref&>::value << ' '
+              << std::is_rvalue_reference<int_rref&>::value << std::endl;
+
+    // 输出 0 1 : 折叠为右值引用
+    std::cout << std::is_lvalue_reference<int_rref&&>::value << ' '
+              << std::is_rvalue_reference<int_rref&&>::value << std::endl;
+    return 0;
+}
+```
+
+= 完美转发
+
+在 C++ 中一直有一个需要解决的问题就是让函数具备**完美转发** (perfect forwarding) 一些参数给其他函数的能力. 在设计上, 此功能可用于实现业务代码和非业务代码的分离. 比如
+
+```
+// implements 是具体业务逻辑的实现函数
+R implements(T const& t);
+
+// 另实现一个包装函数, 包装函数中包含日志与统计
+template <typename FuncType, typename ArgType>
+auto wrapper(FuncType f, ArgType const& a) -> decltype(f(a))
+{
+    auto start = time();
+    logging("Call implements start at %d", start);
+
+    auto&& r = f(a); // 转发参数给业务逻辑函数
+
+    auto end = time();
+    logging("Call implements finished at %d", end);
+    function_statistic("implements", end - start);
+    return std::move(r);
+}
+
+int main()
+{
+    // 调用处可以这样使用 wrapper 与 implements
+    R r = wrapper(implements, T());
+    // ...
+}
+```
+
+在上面的代码片段中, 负责业务逻辑的 `implements` 函数外围的日志和统计代码由 `wrapper` 函数管理. `wrapper` 虽然不会直接用到要向 `implements` 传递的参数, 但由于它要将参数传给 `implements`, 它仍需要一定程度上了解 `implements` 函数的签名.
+
+比如在上面的例子里, 如果以后 `implements` 函数的参数变为非 `const` 的引用, 即声明改成了 `implements(T&)`, 那么 `wrapper` 函数的编译就会因为 `const` 修饰而问题. 或者反过来说, `wrapper` 函数只适合包装那些参数是 `const` 限定引用的函数.
+
+那么, 是否存在更通用的引用参数 (暂且不考虑参数个数的问题) 声明, 使得无论被包装的函数的参数类型如何, 外层的包装函数都可以应对. 这就是参数完美转发要达到的目标.
+
+在 C++11 之前这是无法做到的, 因为通配各种引用的是 `const` 限定引用, 这使得非 `const` 左值也被无故加上了无法修改的限制. 而在 C++11 中, 则可以通过广义应用来定义这样的包装函数.
+
+```
+R implements(T const& t);
+
+// 将参数 ArgType&& 的定义转换为广义引用
+// 注意, FuncType 也被转换为了广义引用, 这样无论可调用对象实参是一般函数指针, 带有或不带有 const 的函数对象的引用都可适配之
+template <typename FuncType, typename ArgType>
+auto wrapper(FuncType&& f, ArgType&& a) -> decltype(f(a))
+{
+    // 调用开始前的工作
+
+    auto&& r = implements(t);
+
+    // 调用结束后的工作
+
+    return std::move(r);
+}
+```
+
+这样看起来很好. 然而事情不是这么简单, 因为前文中介绍过的具名右值引用的一个特性 --- 形参中的右值引用实际上表现为左值引用 --- 在广义引用的情况下也不例外. 所以看起来在 `wrapper` 传给 `implements` 的是广义引用, 而这些引用本应该保留它们原有的形式, 但实际上它们都会变成左值引用.
+
+不妨来做个简单的实验.
+
+```
+#include <iostream>
+#include <type_traits>
+
+template <typename T, typename U>
+int implements(T&& t, U&& u)
+{
+    std::cout << "at implements, t is l/r reference: "
+              << std::is_lvalue_reference<decltype(t)>::value << ' '
+              << std::is_rvalue_reference<decltype(t)>::value << std::endl;
+    std::cout << "at implements, u is l/r reference: "
+              << std::is_lvalue_reference<decltype(u)>::value << ' '
+              << std::is_rvalue_reference<decltype(u)>::value << std::endl;
+    return 0;
+}
+
+template <typename T, typename U>
+int wrapper(T&& t, U&& u)
+{
+    std::cout << "at wrapper, t is l/r reference: "
+              << std::is_lvalue_reference<decltype(t)>::value << ' '
+              << std::is_rvalue_reference<decltype(t)>::value << std::endl;
+    std::cout << "at wrapper, u is l/r reference: "
+              << std::is_lvalue_reference<decltype(u)>::value << ' '
+              << std::is_rvalue_reference<decltype(u)>::value << std::endl;
+    return implements(t, u);
+}
+
+int main()
+{
+    std::unique_ptr<int> t;
+    // 推导出 T 为左值, U 为右值的重载
+    wrapper(t, std::unique_ptr<int>());
+
+    /* 输出
+
+    at wrapper, t is l/r reference: 1 0
+    at wrapper, u is l/r reference: 0 1
+    at implements, t is l/r reference: 1 0
+    at implements, u is l/r reference: 1 0
+
+    输出结束 */
+
+    return 0;
+}
+```
+
+从输出可以看到, 在 `wrapper` 函数里得到的参数类型还是预期的一个左值一个右值, 但是转发到 `implements` 函数里, 就全部成了左值. 这并不是用户希望的行为.
+
+解决这个问题可以借鉴 `move` 的做法, 可以进行 `static_cast` 进行转换. 不过, 由于在 `wrapper` 函数中并不关心传入并转发给 `implements` 函数的 `T` `U` 等引用类型具体是什么, 故针对不同引用类型的 `static_cast` 的结构应该尽可能相似. 其实现方式可能类似这样
+
+```
+template <typename T, typename U>
+int wrapper(T&& t, U&& u)
+{
+    std::cout << "at wrapper, t is l/r reference: "
+              << std::is_lvalue_reference<decltype(t)>::value << ' '
+              << std::is_rvalue_reference<decltype(t)>::value << std::endl;
+    std::cout << "at wrapper, u is l/r reference: "
+              << std::is_lvalue_reference<decltype(u)>::value << ' '
+              << std::is_rvalue_reference<decltype(u)>::value << std::endl;
+    return implements(static_cast<T&&>(t), static_cast<U&&>(u));
+    //                ^^^^^^^^^^^^^^^^     ^^^^^^^^^^^^^^^^
+}
+```
+
+为什么是这样的 `static_cast` 呢? 对于 `T = unique_ptr<int>&` 来说, 在它上面附加右值引用符号, 仍然会折叠到 `T&& = unique_ptr<int>&` 左值引用类型, 所以参数 `t` 上附加的 `static_cast` 其实什么都没做; 而对于 `U = unique_ptr<int>` 值类型来说, `U&&` 就是右值引用类型, 那么这次 `static_cast` 等价于对参数 `u` 进行了一次 `move`, 让它还原成了右值引用类型.
+
+当然, 标准库中也提供了转发工具函数, 使得用户不必在代码中写上一堆 `static_cast`. 这个工具函数 `forward` 的声明如下
+
+```
+// bits/move.h:74
+// 接受左值引用的重载
+// 如果按照以上的做法, 只转发广义引用参数, 这一个重载就够了, 因为所有的具名引用都被认为是左值
+template<class _Tp>
+_Tp&& forward(typename std::remove_reference<_Tp>::type& __t) noexcept; // 与 move 一样不会抛出异常
+
+// :85
+// 针对纯右值的重载, 实际几乎用不到, 因为纯右值直接写在实参列表中即可
+template<class _Tp>
+_Tp&& forward(typename std::remove_reference<_Tp>::type&& __t) noexcept;
+```
+
+由于 `forward` 参数列表中使用 `remove_reference` 对模板参数类型 `T` 进行了一些转换, 因此不能直接写 `forward(u)` 来让编译器推导模板参数类型, 需要用户手动加上, 如
+
+```
+template <typename T, typename U>
+int wrapper(T&& t, U&& u)
+{
+    // ...
+
+    return implements(std::forward<T>(t), std::forward<U>(u));
+    //                ^^^^^^^^^^^^^^^     ^^^^^^^^^^^^^^^
+}
+```
+
+两次 `forward` 调用的类型特化, 详细解释如下
+
+| `_Tp` | 返回值类型 `_Tp&&` | 参数类型 `std::remove_reference<_Tp>::type&`
+| `T = unique_ptr<int>&` | `unique_ptr<int>&` 左值 | `unique_ptr<int>&`
+| `U = unique_ptr<int>` | `unique_ptr<int>&&` 右值 | `unique_ptr<int>&`
+
+可以看出, `forward` 是转发不同引用类型的有力工具. 在 "可变参数模板" 一章中将提到, `forward` 结合可变参数模板函数, 还能实现转发任意多个参数的功能.

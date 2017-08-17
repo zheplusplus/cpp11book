@@ -1,0 +1,42 @@
+作为最早引入 "指针" 这一概念的语言, C 和 C++ 中在处理空指针的时候却并没有起到表率作用. 用户一般会用 `NULL` 来表示空指针, 但它并不是关键字, 而是一个宏, 在 C 中它被定义为 `(void*)0`, 而 C++ 中禁止了 `void*` 指针类型向其他指针类型隐式转换, 并由一条特殊规则 --- 字面量 0 可以被赋值给指针类型的量 --- 来保障编译通过. 同时 `NULL` 的定义也变为了字面量 0.
+
+这是个很容易让编译器产生误解的规则. 比如在 C++ 中以 `NULL` 作为实参时, 可能使得重载决议出错
+
+```+
+void f(int x) { std::cout << "overload int" << std::endl; }
+void f(int* p) { std::cout << "overload int ptr" << std::endl; }
+
+f(NULL); // 输出为 overload int^[[g++ 4.5 以后版本中将 `NULL` 的定义替换为了内置的关键字 `__null`, 在此处会产生无法决议重载的编译错误]]
+int* p = NULL;
+f(p);    // 输出为 overload int ptr
+```
+
+在 C++11 中引入新的空指针**关键字** `nullptr` 来解决这一问题. 不过, `NULL` 宏的定义并没有被直接改成这一关键字, 要使用它的话必须写上 `nullptr` 这一名字. 如, 修改上面的代码为
+
+```
+f(nullptr); // 输出为 overload int ptr
+int* p = nullptr;
+f(p);       // 同上
+```
+
+`nullptr` 不仅仅可以表示空指针的值, 它还有一个独立的类型 `std::nullptr_t`. 当然这一类型的所有实例都相同, 即都是空指针.
+
+空指针类型并不很常用. 它允许引入针对空指针类型的重载. 如
+
+```
+void f(int* p) { std::cout << "overload int*" << std::endl; }
+void f(std::nullptr_t) { std::cout << "overload nullptr" << std::endl; }
+
+int main()
+{
+    f(nullptr);       // 输出 overload nullptr
+
+    int* p = nullptr; // 虽然 p 是空指针, 但其类型是 int*
+    f(p);             // 输出 overload int*
+
+    // 可以使用 nullptr_t 定义对象实例, 这些实例都是空指针
+    std::nullptr_t q;
+    f(q); // 输出 overload nullptr
+    return 0;
+}
+```

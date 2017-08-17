@@ -1,0 +1,106 @@
+C++ 中的引用一直以来有个令人困惑的特性, 就是带有 `const` 限定的引用可以绑定临时对象甚至字面常量, 如
+
+```
+#include <iostream>
+
+void test_ref(int& m)
+{
+    std::cout << "non-const " << m << std::endl;
+}
+
+void test_ref(int const& m)
+{
+    std::cout << "const " << m << std::endl;
+}
+
+int zero() { return 0; }
+
+int main()
+{
+    int a = 0;
+    int const b = 1;
+    test_ref(a);      // 输出 non-const 0
+    test_ref(b);      // 输出 const 1 : 这两句没有争议
+
+    test_ref(zero()); // 输出 const 0 : 临时对象匹配 const 引用重载
+    test_ref(1);      // 输出 const 1 : 字面常量也匹配 const 引用重载
+
+    // 一个特别的规则, const 引用可以显式直接绑定临时对象或字面量
+    int const& m = zero();
+    int const& n = 1;
+    return 0;
+}
+```
+
+这一规则里, `const` 限定引用实际扮演着两种不同的身份: 对不可修改的值的引用, 还有对临时对象或字面常量的引用. 这就会产生混淆, 进而导致误用. 然而这是为什么呢? 有一个非常朴素的原因, 就是防止临时对象被作为左值赋值. 即防止类似下面的代码编译成功
+
+```
+zero() = 1;
+```
+
+但这样的防御措施并不完美, 有时反而还会造成更大的混乱, 比如下面这段代码
+
+```
+#include <iostream>
+
+struct MyClass {
+    // 定义重载分别对应 const 限定和非 const 限定的情况
+    void print()       { std::cout << "non const" << std::endl; }
+    void print() const { std::cout << "const" << std::endl; }
+};
+
+// 同样定义两个全局函数重载, 分别对应 const 限定和非 const 限定的情况
+template <typename T>
+void p(T& t) { t.print(); }
+
+template <typename T>
+void p(T const& t) { t.print(); }
+
+int main()
+{
+    MyClass().print(); // (a) 直接在临时对象上调用 print() 成员函数
+    ::p(MyClass());    // (b) 将临时对象传给全局 p 函数, 由 p 来决议 print() 成员函数调用
+    return 0;
+}
+```
+
+那么这段代码输出是什么呢? 结果可能有些令人惊讶, 是
+
+:::
+non const
+const
+:::
+
+也就是说, (a) 处直接用临时对象调用其成员函数 `print`, 重载决议使其调用的是无 `const` 版本; 而在 (b) 处稍作更改, 将临时对象传给全局 `p` 函数, 决议的结果的是参数为 `const` 限定引用的 `p` 函数重载, 进而在 `p` 内用 `const` 限定引用决议出带有 `const` 版本的 `print` 成员函数重载.
+
+这一规则直接导致了一些更离谱的代码, 比如 `operator=` 重载一般都不会有 `const` 限定, 那么下面这种代码完全合法
+
+```
+struct IntWrap {
+    int x;
+    explicit IntWrap(int xx) : x(xx) {}
+
+    IntWrap& operator=(int xx)
+    {
+        this->x = xx;
+        return *this;
+    }
+};
+
+int main()
+{
+    IntWrap(10) = 20; // 使用临时对象的 = 算符重载, 可将临时对象放在等号左侧
+    return 0;
+}
+
+// 更极端的例子
+IntWrap& f()
+{
+    // return IntWrap(0); 不合法, 不能直接返回临时对象
+    return IntWrap(0) = 0; // 合法, 因为一次 operator= 调用将返回值 "洗" 成了左值引用
+}
+```
+
+此大乱之道也, 焉能不正之. 而混乱的根源就是对待临时对象时, 调用成员函数决议重载的规则与调用其他函数决议的规则大相径庭.
+
+因此, 新标准中增加了针对临时对象和字面量的新的引用类型, 并更改了相应的重载决议规则, 以改正上述这些令人困惑的行为.

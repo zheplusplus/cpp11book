@@ -1,0 +1,38 @@
+在 C++11 中, 用户可以给枚举类型指定更精确和严格的类型了, 这一点体现在两方面: 允许指定枚举类型的宽度和符号; 允许在引用枚举常量时要求用户显式指定枚举的域来减少名字冲突的可能性.
+
+第一项特性的具体做法是, 在声明枚举类型时如声明继承一样, 为这个枚举类型指定一个 "父类" 类型. 当然, 这与继承并无任何关系, 只是规定此枚举类型可能的取值范围, 这样做可以让编译器提供更好的取值检查. 如
+
+```!
+enum flags : unsigned short {
+    READONLY = 1,
+    READWRITE = 2,
+    ADMIN = 4,
+};
+```
+
+以上声明中规定了 `flags` 枚举中的常量是无符号数且位宽与 `short` 类型一样. 一旦编译器检查到该类型的某个常量取值超过此返回就会报错, 如
+
+```
+enum uint_enum : unsigned int {X = -1}; // 错误: -1 不是无符号整数
+enum byte_enum : char {Y = 128};        // 错误: 128 超过了 char 的表示范围
+```
+
+当然, 为枚举指定类型限定仍然只能使用整型, 不能写如 `enum X : double` 的声明.
+
+第二项特性的具体做法是, 在 `enum` 关键字后加上 `struct` 或 `class` 关键字 (凭个人喜好或编码规范, 对编译器而言完全无区别), 作用是所有该枚举类型定义的常量不能直接引用, 必须加上枚举类型名, 这样做可以避免枚举常量重名的问题. 如
+
+```!
+enum class Province {HUBEI, HUNAN, GUANGDONG, HAINAN};
+enum struct City {WUHAN, CHANGSHA, GUANGZHOU, HAIKOU};
+
+Province p = Province::HUBEI; // 正确
+City c = City::WUHAN;         // 正确: 以 enum 名作为名字空间访问
+City d = WUHAN;               // 错误: WUHAN 在当前上下文中未定义
+```
+
+这两个特性也可以结合在一起使用, 如
+
+```!
+enum class Direction: unsigned char {RIGHT, DOWN, LEFT, TOP};
+Direction d = Direction::RIGHT;
+```

@@ -1,0 +1,301 @@
+在第一章介绍 `unique_ptr` 时简单提过 `tuple` 类型. 因为在 `unique_ptr` 中定义的 `tuple` 类型只用了两个模板参数, 逻辑上与使用 `pair` 类型相同, 故也没有更深入解释.
+
+作为可变参数模板类型的一个先驱, `tuple` 的使用和实现都有很典型, 围绕 `tuple` 本身进行分析, 便能大致摸清可变参数模板类型的实现方式和一些技巧了.
+
+= 基本使用
+
+`tuple` 类型的用法与 `pair` 非常类似, 只是因其使用了可变参数模板特性, 可以扩展到一次包括任意多个元素.
+
+```
+// 以单个类型特化 tuple
+std::tuple<int> x(0);
+// 通过 get<int> 函数获取 tuple 指定位置上的元素的左值引用; 此处获取的是字符串的引用
+// 不可以用下标索引 x[0]
+std::cout << std::get<0>(x) << std::endl; // 0
+
+// 以三个类型特化 tuple
+std::tuple<std::string, double, int> y("hello", 3.14, 2);
+std::cout << std::get<0>(y) << std::endl; // hello
+std::cout << std::get<1>(y) << std::endl; // 3.14
+std::cout << std::get<2>(y) << std::endl; // 2
+
+// 不包含任何元素的 tuple
+std::tuple<> tuple_of_nothing;
+
+// 特化类型分别是 int, int, std::string 的 tuple
+std::tuple<int, int, std::string> point(0, 0, "origin");
+
+// 若 tuple 非 const 限定, 那么获取了引用就能修改它们了
+std::get<2>(point) = "A";
+std::get<0>(point) += 1;
+
+// make_tuple 类似与 make_pair, 返回由其参数类型特化出的一个 tuple 对象
+std::cout << (point == std::make_tuple(1, 0, "A")) << std::endl; // 1
+```
+
+不过, 像 `tuple` 或 `pair` 这样单纯将若干个对象聚合在一起的结构的可读性非常差. 如下面这个例子用到了 `std::map` 和 `std::pair`
+
+```
+void vote_for(std::map<std::string, int>& votes, std::string const& name)
+{
+    std::pair<std::map<std::string, int>::iterator, bool>
+            r = votes.insert(std::make_pair(name, 0));
+    if (r.second) {
+        // 有新的名字被加入了
+    }
+    r.first->second += 1;
+//  ^^^^^^^^^^^^^^^
+}
+```
+
+函数的逻辑是给某个人投票, 如果这个人没有记录, 新建之并触发新建事件, 然后给这个人票数加一. 由于 `map::insert` 的返回值是一个 `pair` 里套着另一个实质上还是 `pair` 的迭代器对象, 票数加一这句代码 `r.first->second += 1` 看起来简直是随手拼凑的涂鸦. 假如它能写作 `r.iterator->value += 1` 都会好很多, 可惜由于使用的是 `pair` 因而只得用 `first`, `second` 这样的成员名字. `tuple` 同理. 因此, 不建议在实际项目中大量使用 `pair` 或 `tuple`.
+
+= 实现原理
+
+`pair` 的结构非常简洁明了, 包含两个模板参数类型定义的数据成员; 然而 `tuple` 并不能这样实现, 因为没有参数包展开语法能够用于定义一组成员.
+
+因此, `tuple` 使用多重继承来实现. 这种多重继承并不是直接在类型继承处展开模板参数包, 否则有以下导致编译失败的可能
+
+* 模板参数含有原生类型, 原生类型不能用于继承
+* 模板参数类型可能是 `final` 修饰的, 不能用于继承
+* 模板参数含有两个相同的类型, 不能重复继承一个类型
+
+要解决以上问题, `tuple` 的实现中运用了如下的包装模板 `_Head_base`, 用来包装参数类型
+
+```
+// tuple:78
+// 参数包装类型声明, 各模板参数含义如下
+// _Idx:             索引标识
+// _Head:            将由传给 tuple 的模板参数来特化的元素类型参数
+// _IsEmptyNotFinal: 是否是空结构体 (不含数据成员或虚函数) 且非 final 修饰
+template<std::size_t _Idx, typename _Head, bool _IsEmptyNotFinal>
+struct _Head_base;
+
+// :81 类型参数是空结构体, 且不为 final 修饰的特化: 继承此类型
+template<std::size_t _Idx, typename _Head>
+struct _Head_base<_Idx, _Head, true>
+    : public _Head // _Head 为父类
+{
+    // ...
+};
+
+// :128 除以上情况的特化: 聚合此类型
+template<std::size_t _Idx, typename _Head>
+struct _Head_base<_Idx, _Head, false>
+{
+    // :174 使用 _Head 类型定义的成员
+    _Head _M_head_impl;
+
+    // ...
+};
+```
+
+而 `tuple` 以如下方式使用 `_Head_base`
+
+```
+// :185 先导定义, 用于产生索引标识的 _Tuple_impl
+template<std::size_t _Idx, typename... _Elements>
+struct _Tuple_impl;
+
+// :192 类型参数包 _Elements 的数量降为 0 的偏特化
+// 既然所有类型参数已经使用完毕, 这是一个空结构体
+template<std::size_t _Idx>
+struct _Tuple_impl<_Idx> {};
+
+// :230 更一般的偏特化, 至少 1 个 _Head 参数, 剩下的类型被称之为 _Tail
+template<std::size_t _Idx, typename _Head, typename... _Tail>
+struct _Tuple_impl<_Idx, _Head, _Tail...>
+        // _Tuple_impl 递归特化, 将 _Tail 传递过去, 同时将 _Idx 加上 1 以产生不同的特化类型
+    : public _Tuple_impl<_Idx + 1, _Tail...>
+        // 将 _Head_base 作为自己的基类; 使用 private 继承防止对象被基类引用误用
+    , private _Head_base<_Idx, _Head,
+                                      // 是否采用继承的方式产生 _Head_base, 后文将详细分析
+                                      __empty_not_final<_Head>::value>
+{
+    // ...
+};
+
+// :389 暴露出的 tuple 类型, 以 0 为初始 _Idx
+template<typename... _Elements>
+class tuple
+    : public _Tuple_impl<0, _Elements...>
+{
+    // ...
+};
+```
+
+`tuple` 类型直接继承的是内部类型 `_Tuple_impl`, 后者直接继承各种 `_Head_base` 的特化. 用 `_Head_base` 将需要继承的类型, 也就是传给 `tuple` 的模板参数类型包装起来, 这样无论原始类型是什么都可以裹在这个模板里继承.
+
+然后, 使用 `_Idx` 整型参数对每个 `_Head_base` 基类进行一次顺序编号, 这样即使有相同参数类型 `T`, 其通过不同编号参数特化出的基类. 如特化 `std::tuple<int, int>`, 产生的两个基类 `_Head_base<0, int>` 和 `_Head_base<1, int>` 不是同一类型.
+
+下面对 `std::tuple<int, std::string, bool>` 这个特化的继承方式作一个图解, 以更清晰地理解其结构
+
+:::
+tuple<int, std::string, bool>
+ |
+ |
+ '----: _Tuple_impl<0, int, std::string, bool>    // _Elements = int, std::string, bool
+          |
+          |
+          |---: _Head_base<0, int, false>
+          |
+          |
+          '---: _Tuple_impl<1, std::string, bool> // _Elements = std::string, bool
+                  |
+                  |
+                  |---: _Head_base<1, std::string, false>
+                  |
+                  |
+                  '---: _Tuple_impl<2, bool>      // _Elements = bool
+                          |
+                          |
+                          |-: _Head_base<2, bool, false>
+                          |
+                          |
+                          '-: _Tuple_impl<3>      // _Elements 为空
+:::
+
+而 `_Head_base` 最后有一个 `bool` 参数, 用以决定此 `_Head_base` 是否将参数类型作为父类使用, 而不是作为成员. 为何要有继承方式的偏特化呢? 把所有类型参数全部用聚合的方式, 定义为类型成员不行吗?
+
+行是行, 但是会有代价. 在介绍对象的同一性时提到过, 为了确保两个对象地址不同, C++ 规定对空结构体求 `sizeof` 要得到一个非 0 值; 而若将这个结构体定义为另一个结构体的成员, 那么再加上内存对齐, 后者可能会占用更多的空间. 不妨看看下面这个测试
+
+```
+int main()
+{
+    struct E {};
+    std::cout << sizeof(E) << std::endl;   // 1 : 同一性基本要求
+
+    struct F { E e; };
+    std::cout << sizeof(F) << std::endl;   // 1 : 将空结构体作为成员, 体积不会继续增加
+
+    struct G { E e; int x; };
+    std::cout << sizeof(int) << std::endl; // 4
+    std::cout << sizeof(G) << std::endl;   // 8 : 但如果在空结构体成员后加上 int 成员
+                                           //     因为内存对齐, 空结构体实际消耗了 4 字节
+    struct H: E { int x; };
+    std::cout << sizeof(H) << std::endl;   // 4 : 空结构体作为父类继承, 就只占用 int 的空间
+    return 0;
+}
+```
+
+从最后 `H` 的定义看出, 如果是继承空结构体, 然后在子类中加入其他成员, 则其没有额外空间消耗. 这个优化被称之为**空基类优化** (Empty Base Optimization, 简称 EBO). 也就是说, `std::tuple` 的实现倾向于用这种技巧来节省空间. 下面这两段代码便可以一窥其中端倪.
+
+```
+// 使用聚合的 HeadBase
+template <typename Head>
+struct HeadBaseAggr { Head head; };
+
+template <typename First, typename Second>
+struct TupleAggr
+    : HeadBaseAggr<First>
+    , HeadBaseAggr<Second>
+{};
+
+// 两个空类型和一个包含 int 的类型
+struct E {};
+struct F {};
+
+int main()
+{
+    // 继承聚合模板类型的特化, 求得 sizeof 却是 2
+    // 因为继承了两个空间占用各 1 字节的基类
+    std::cout << sizeof(TupleAggr<E, F>) << std::endl;   // 2
+
+    // 此处更明显, 使用聚合会引起编译器生成内存对齐的结构, 进一步增加空间消耗
+    std::cout << sizeof(TupleAggr<E, int>) << std::endl; // 8
+    return 0;
+}
+```
+
+而使用继承的方式, 结果则是
+
+```
+template <typename Head>
+struct HeadBaseInherit: Head {};
+
+// 两种 Tuple 都使用继承, 只是继承的基类模板不同
+template <typename First, typename Second>
+struct TupleInherit
+    : HeadBaseInherit<First>
+    , HeadBaseInherit<Second>
+{};
+
+// 两个空类型和一个包含 int 的类型
+struct E {};
+struct F {};
+struct G { int x; };
+
+int main()
+{
+    // 用两个空结构体来特化, 结果纯继承方式求得 sizeof 为 1
+    // 因为这是纯粹继承的方式, 基类占用的空间可以被完全优化掉
+    // 剩下 1 字节是同一性的要求
+    std::cout << sizeof(TupleInherit<E, F>) << std::endl; // 1
+
+    // 大小等于 G 类型, 也就是 int 类型
+    std::cout << sizeof(TupleInherit<E, G>) << std::endl; // 4
+    return 0;
+}
+```
+
+可能有读者会问, 什么情况下会向 `std::tuple` 传递一个空结构体呢? 真的会有这样的用况吗? 有! 例子就在第一章: `unique_ptr` 中, 使用 `tuple<pointer_type, deleter_type>` 来管理, 也许会有读者当时就觉得很困惑, 为什么要用个 `tuple` 而不是 `pair`, 或者直接分别用 `pointer_type`, `deleter_type` 定义两个成员呢? 看了上面这部分, 答案自然浮出水面: `std::default_deleter` 就是一个空结构体 (只有非虚成员函数, 也算空结构体), 使用 这种情况下 `tuple` 能使 `unique_ptr` 的空间占用与裸指针相同, 不必产生额外消耗.
+
+= 向值类型的转换
+
+最后简单分析一下 `make_tuple` 实现的一些注意事项. `make_tuple` 的定义是
+
+```
+// tuple:858
+template<typename... _Elements>
+constexpr // 与 make_pair 一样, 在元素类型都是字面类型时被 constexpr 修饰
+tuple<typename __decay_and_strip<_Elements>::__type...> // 返回 tuple 类型中的参数类型是经过转换的
+make_tuple(_Elements&&... __args)                       // 参数类型是广义引用
+{
+    typedef tuple<typename __decay_and_strip<_Elements>::__type...> __result_type;
+    return __result_type(std::forward<_Elements>(__args)...);
+}
+```
+
+虽然在本节开头的例子中说它 "返回由其参数类型特化" 的 `tuple`, 但实际上 `make_tuple` 对结果 `tuple` (以及 `make_pair` 对 `pair`) 的特化行为要更复杂. 至少从上面的声明中可以看出, 返回类型并非直接是 `tuple<_Elements...>` 而是用了叫做 `__decay_and_strip` 的类型转换. 这种做法与其参数类型全是广义引用有关, 比如给定以下的代码
+
+```
+int x = 0;
+int const y = 1;
+
+std::make_tuple(x, y, "A");
+```
+
+就例子中的这个表达式 `std::make_tuple(x, y, "A")` 而言, 按广义引用类型参数的推导方式, `_Elements = {int&, int const&, char const(&)[2]}`, 得到的结果亦会是 `tuple<int&, int const&, char const(&)[2]>`, 这与想要得到的 `tuple<int, int, char const*>` 相去甚远. 因此 `make_tuple` 并非照搬参数类型给 `tuple`, 而要经过一次类型转换去掉引用类型, 以及将数组转化为指针等, 具体包括
+
+* 若给定的类型 `T` 是任何引用, 去掉其引用
+* 若给定的类型 `T` 是某个 `U[]` 类型, 则将 `T` 转换成 `U*` 类型
+* 若给定的类型 `T` 是一个函数, 则转换为函数指针类型
+* 同时去掉给定类型的 `const` `volatile` 修饰
+* 将 `reference_wrapper` 转换成引用类型
+
+可以看出这个规则除开最后一条, 其他与第一章提到的 `auto` 自动推导得出的类型一致.
+
+这种防止从广义引用参数推导出左值引用类型引用, 并且要求在需要引用时传入 `reference_wrapper` 的行为也被称为退化复制 (decay copy). 除了在 `tuple` 中, 在后文中的 `bind`, `thread` 也有使用.
+
+如果希望 `tuple` 的元素类型就是 `reference_wrapper`, 则应该显式写出, 如
+
+```
+int main()
+{
+    int x = 0;
+    int y = 5;
+    // 显式写出元素类型为 reference_wrapper
+    std::tuple<std::reference_wrapper<int>, int> t = make_tuple(std::ref(x), y);
+
+    std::cout << x << std::endl;    // 0
+    std::cout << y << std::endl;    // 5
+
+    // 因为 x 是引用传入的, 这里自增会改变 x 的值; 但不会改变以值传入的 y 的值
+    std::get<0>(t).get()++;
+    std::get<1>(t)++;
+
+    std::cout << x << std::endl;    // 1
+    std::cout << y << std::endl;    // 5
+    return 0;
+}
+```

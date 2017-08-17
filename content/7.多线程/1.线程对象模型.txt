@@ -1,0 +1,446 @@
+线程应该以何种形式体现出来? 作为一个可执行流, 就像程序的入口被设计为 `main` 函数一样, 是一个函数应该很自然, 至少 POSIX 拟定的线程 API 就是这样的, 每个线程都是一个接受 `void*` 参数的函数, 至于这个 `void*` 应该如何解释为线程参数就看用户自己实现了.
+
+而在 C++ 中, 一个可以被调用执行的不一定是函数, 也可能是函数对象. 事实上, C++11 线程的设计中, 除了可以使用任何函数作为新线程的执行过程, 还可以使用一个函数对象. 那么接下来就看看线程是如何被表现的.
+
+= 线程对象 API 设计
+
+下面是一个简单例子^[[在 Linux 中, 涉及多线程的程序代码在链接时需要加上 `-pthread` 参数链接 POSIX thread 库, 否则尝试新建线程时会抛出 `system_error` 异常]]
+
+```
+#include <thread>   // thread
+#include <iostream>
+
+struct ThreadExec {
+    int n;
+
+    explicit ThreadExec(int nn)
+        : n(nn)
+    {}
+
+    void operator()()
+    {
+        for (int i = 0; i < this->n; ++i) {
+            std::cout << "Thread object output\n";
+        }
+    }
+};
+
+void thread_exec()
+{
+    for (int i = 0; i < 4; ++i) {
+        std::cout << "Thread function output\n";
+    }
+}
+
+int main()
+{
+    std::thread t(ThreadExec(4)); // 使用函数对象构造 thread 对象
+    std::thread u(thread_exec);   // 使用函数指针构造 thread 对象
+    t.join();                     // 等待线程结束
+    u.join();
+    return 0;
+}
+```
+
+可能的输出为
+
+:::
+Thread object output
+Thread object output
+Thread object output
+Thread function output
+Thread function output
+Thread object output
+Thread function output
+Thread function output
+:::
+
+在这个例子中, 分别使用函数对象和函数指针构造各构造了一个 `std::thread` 的实例. 函数 `thread_exec` 的参数列表为空, 而类型 `ThreadExec` 的函数调用算符重载的参数列表也是空. 这并不是一种巧合, 而是在默认情况下, 传递给 `thread` 的可执行对象参数必须满足这一规格, 在新的线程产生后, 其任务就是对此参数对象或参数函数进行调用. 函数或函数对象的调用算符重载的返回值可以不是 `void`, 但任何返回值都将被线程忽略.
+
+例子中构造线程对象后, 并未对这些对象进行任何其他操作, 而这两个线程就立即开始对交予它的参数进行调用并分别输出内容. 直到 `main` 结束之前调用 `t.join()` 和 `u.join()` 等待这两个线程结束. 可以看出, C++11 的线程对象设计与其他流行的高级语言如 Java, C# 等线程对象设计有所不同, 它是非常 "急躁" 的, 即当它被构造后就立即开始执行, 而不需要一个额外的 `start()` 之类的成员函数调用.
+
+当然, 除了使用常规函数对象之外, 也可以利用等价的 lambda 语法, 比如上面例子中的 `ThreadExec` 对象, 可以更改为下面这样等价的代码
+
+```
+void thread_exec() { for (int i = 0; i < 4; ++i) std::cout << "Thread function output\n"; }
+
+int main()
+{
+    int n = 4;
+    std::thread t(
+        [n]() // 使用 lambda 替代函数对象
+        {
+            for (int i = 0; i < n; ++i) {
+                std::cout << "Thread object output\n";
+            }
+        }
+    );
+    std::thread u(thread_exec);
+    t.join();
+    u.join();
+    return 0;
+}
+```
+
+= 传递参数给可执行对象
+
+上面这些是单使用可调用对象构造对象, 而这些可调用对象也不需要参数, 那么线程中可以直接使用它们. 而若要向线程提供参数, 则也应在线程构造时立即提供, 而不能等到线程开始执行了才以别的手法进行设置. 提供给线程构造函数的额外参数会被线程移交给可调用对象, 因此可调用对象也要具备相应的调用算符函数重载, 或者作为函数指针的可调用对象要具有相应的签名.
+
+```
+void thread_exec(int times)
+{
+    for (int i = 0; i < times; ++i) {
+        std::cout << "t0 output\n";
+    }
+}
+
+int main()
+{
+    std::thread t0(thread_exec, 4);     // 函数需要一个参数, 相应的实参为 4
+    std::thread t1(
+        [](char const* name, int times)
+        {
+            auto msg = std::string(name) + " output\n";
+            for (int i = 0; i < times; ++i) {
+                std::cout << msg;
+            }
+        }, "t 1", 3);                   // lambda 需要两个参数, 也都通过线程构造参数传入
+    t0.join();
+    t1.join();
+    return 0;
+}
+```
+
+可能的输出为
+
+:::
+t0 output
+t0 output
+t 1 output
+t0 output
+t0 output
+t 1 output
+t 1 output
+:::
+
+在处理整数或指针这样的基本数据类型的参数时, `thread` 的构造行为非常类似于 `bind`, 甚至以上例子中的 `thread` 对象构造就等价于这样的代码
+
+```
+std::thread t0(std::bind(thread_exec, 4)); // 使用 bind 预绑定参数 4, 并将返回的函数对象交给 thread
+//             ^^^^^^^^^^              ^
+std::thread t1(std::bind(                  // 使用 bind 预绑定任何其他参数
+    [](char const* name, int times)
+    {
+        auto msg = std::string(name) + " output\n";
+        for (int i = 0; i < times; ++i) {
+            std::cout << msg;
+        }
+    }, "t 1", 3));
+t0.join();
+t1.join();
+```
+
+不过, `thread` 底层的机制与 `bind` 又有本质不同. 首先, `thread` 对象自身不存储任何参数, 那么这些参数去了哪里? 其实直接构造到新线程的栈上, 也就是构造线程所用的可调用对象的形参列表中.
+
+由于中间省略了参数中转的步骤, 一些只可移动的对象在构造 `thread` 时是可行的. 如
+
+```
+struct SumPtr {
+    std::unique_ptr<int> p;
+
+    explicit SumPtr(int x)
+        : p(new int(x))
+    {}
+
+    void operator()(std::unique_ptr<int> q) // 参数非引用类型
+    {
+        std::cout << *this->p + *q << std::endl;
+    }
+};
+
+int main()
+{
+    SumPtr s(2);
+    std::unique_ptr<int> q(new int(3));
+    // auto f = std::bind(std::move(s), std::move(q));
+    // f(); 这样是无法编译的
+
+    // 但向 thread 传参可以利用右值移动构造参数到新线程的函数栈上
+    std::thread t(std::move(s), std::move(q));
+    t.join(); // 线程内输出 5
+    return 0;
+}
+```
+
+从上面这个例子还可以推断出, 默认情况下, 将左值传递给 `thread` 构造函数时会复制这些参数, 无论是可调用对象, 还是传给此可调用对象的其他参数; 而如果这些参数中有无法复制的对象就会报错.
+
+而如果线程所使用的可调用对象的相应参数位置接受左值引用作为参数, 那么必须使用 `ref` 或 `cref` 对当前上下文中的对象进行引用, 否则会引起编译错误, 这一点也和 `bind` 不同.
+
+```
+int main()
+{
+    int x = 0;
+
+    std::thread a(
+        [](int& r)       // 如果要使用左值引用
+        {                // 必须使用 reference_wrapper 包装参数
+            // ...
+        }, x);           // 编译报错
+    a.join();
+
+    std::thread b(
+        [](int& r)
+        {
+            r++;
+        }, std::ref(x)); // 正确
+    b.join();
+
+    std::cout << x << std::endl; // 输出 1 : 在线程中被改动了
+    return 0;
+}
+```
+
+另外有个与 `bind` 一致的规则是, 构造 `thread` 的实参类型也可以与可调用对象相应的形式参数类型不同, 但需要注意两点不同, 一是被转换参数是完美转发的, 因此可能会匹配右值重载的转换或构造函数, 二是转换的过程在新线程中执行. 第二点很重要, 因为如果转换的过程抛出异常, 此异常会出现在新线程中而不能被主线程捕获.
+
+关于这一规则, 请阅读以下例子
+
+```
+struct A {};
+
+struct B {
+    /* implicit */ B(A&& a) {       // (c)
+        // ...
+
+        throw std::runtime_error("bang!");
+    }
+
+    /* implicit */ B(A const& a) {}
+};
+
+int main(int argc, char** argv)
+{
+    try {
+        std::thread t(
+            [](B x)                 // (a)
+            {
+                // ...
+            }, A());                // (b)
+        t.join();
+    } catch (std::runtime_error&) { // (d)
+        std::cout << "exception caught" << std::endl;
+    }
+    return 0;
+}
+```
+
+上述程序在运行时会因发生未捕获的异常而终止. 这是由于在 (a) 处线程所执行的函数要求的形参类型与 (b) 处传给 `thread` 构造函数的实参类型可以不同, 因此会执行一次 `A` 实例向 `B` 实例的转换构造, 这次构造匹配到了 (c) 处定义的隐式构造函数, 而这个函数中可能有某种情况导致一个异常抛出. 而由于此调用栈已经处在新线程中, 主线程中 (d) 处的 `catch` 语句不会有任何作用. 因此, 新线程中产生了一个未捕获的异常.
+
+在任何线程包括主线程中抛出的异常如果没有被捕获, 程序都会调用 `terminate` 求个速死; 而对于上面例子中的这种情况而言, 甚至没有位置安插异常处理代码, 因此最好在主线程中多写一些代码将 `A()` 转换为 `B` 的实例再交给新线程. 同时也应当避免使用可能导致异常的复制构造函数去构造新线程的参数, 而尽量使用右值将对象移动到新线程的栈上去.
+
+= 线程对象的管理与存储
+
+随着可能启动的线程越来越多, 像以上代码这样把所有的其他线程都放在 `main` 函数中构造并等待的做法很不方便, 也是不建议的. 如何在其他函数中创建线程, 从函数调用中返回线程, 或将线程放入容器中管理很自然是开发人员会面对的问题. 在解决这些问题时, 自然就会考虑 `thread` 对象作为 C++ 对象的一些本性: 它可以复制吗, 它可以移动吗, 以及它可以与容器配合使用吗?
+
+如果有复制的要求, `thread` 是不能直接满足的. 无论传给 `thread` 的各个参数本身是否可以复制, 线程对象本身是不能复制的, 这听起来也比较令人安心. 而如果想要产生一个一模一样的执行过程并从头开始, 应该使用相同的参数构造一个新的线程.
+
+线程对象是可以移动的, 虽然这一说法有些不直观. 换言之, 线程对象可以从另一个线程对象移动构造, 移动来源将变为一个 "空" 线程对象; 另外, 使用默认无参的构造函数也可以构造出空的线程对象. 空线程对象不会执行任何过程, 但它可以被作为另一个线程的移动目标. 如
+
+```
+std::thread create_thread()
+{
+    return std::thread(
+        []()
+        {
+            for (int i = 0; i < 4; ++i) {
+                std::cout << "Thread output\n";
+            }
+        });
+}
+
+int main()
+{
+    std::thread t;                  // 使用无参构造函数构造空的线程对象
+    t = create_thread();            // 使用移动赋值, 将函数返回的线程对象交给 t
+    std::cout << "move assigned\n";
+
+    std::thread u(std::move(t));    // 使用移动构造
+    std::cout << "move constructed\n";
+
+    for (int i = 0; i < 2; ++i) {
+        std::cout << "Main output\n";
+    }
+
+    u.join(); // 只需要等待 u 结束, 而不必再关心作为移动来源的 t
+    return 0;
+}
+```
+
+可能的输出为
+
+:::
+move assigned
+Thread output
+Thread output
+move constructed
+Main output
+Main output
+Thread output
+Thread output
+:::
+
+上面例子中在函数中构造了一个线程对象, 产生了一个线程, 并两度使用移动语义交接该线程移交到别处. 在移动过程中, 这个线程的执行不受影响, 并且, 最终要等待结束的也只有一个线程.
+
+另外, 也可以用容器来存储并管理线程对象.
+
+```
+std::thread create_thread(int index)
+{
+    return std::thread(
+        [](std::string msg)
+        {
+            for (int i = 0; i < 8; ++i) {
+                std::cout << msg;
+            }
+        }, "Thread #" + std::to_string(index) + "\n");
+    //                  ^^^^^^^^^^^^^^
+    // to_string(T) 其中 T 为各种数值类型; 这是 C++11 新加入的将数值转换为字符串的函数
+}
+
+int main()
+{
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 3; ++i) {
+        threads.push_back(create_thread(i)); // 存入 vector
+    }
+    for (auto& t: threads) { // 逐一等待结束
+        t.join();
+    }
+    return 0;
+}
+```
+
+移动一个线程对象和移动一个像 `vector` 这样存储数据的容器给人的感受显然是不一样的, 实际上对线程的移动只限于这个线程的本地句柄 (native handle) 数据, 而线程本身以及其执行状态仍然由操作系统管理.
+
+也就是说, 在 C++ 代码中线程对象的构造, 移动和析构, 实际上是线程对象本身管理的线程句柄数据的操作在代码上的体现, 而其底层的线程本身执行行为却不会受到任何影响. 在 `thread` 头文件中的这一部分行为的实现如下
+
+```
+// thread:60
+class thread
+{
+public:
+    // :68
+    // id 类, 包装本地线程句柄数据的内部类型
+    // 此内部类型是标准 API 的一部分, 任何平台上都可以通过线程对象的 `get_id()` 函数获得此句柄类型
+    class id {
+        // 此成员类型 native_handle_type 在不同平台上可能不同
+        native_handle_type _M_thread;
+    public:
+        // 默认构造的 id 是无效的
+        id() noexcept
+            : _M_thread()
+        {}
+
+        explicit id(native_handle_type __id)
+            : _M_thread(__id)
+        {}
+
+        // ...
+
+        // :82
+        // 两个 id 对象可以被判定是否相同, 判定依据是其内含的本地句柄
+        friend bool operator==(thread::id __x, thread::id __y) noexcept
+        {
+            return __gthread_equal(__x._M_thread, __y._M_thread);
+        }
+    };
+
+    // ...
+private:
+    // :119
+    // thread 对象的内部数据可能只有这一 id 成员
+    id _M_id;
+public:
+    // ...
+
+    // :156
+    // 交换两个线程的句柄内容
+    void swap(thread& __t) noexcept
+    {
+        std::swap(_M_id, __t._M_id);
+    }
+
+    // :160
+    // 是否可以等待此线程结束, 此函数也可用于判定此线程是否不为空线程
+    // 判定方式就是比较内含的 id 成员是否等同于默认构造的无效 id
+    bool joinable() const noexcept
+    {
+        return !(_M_id == id());
+    }
+
+    // :128
+    // 移动构造函数, 与 vector 一样, 使用默认构造加交换方式
+    thread(thread&& __t) noexcept
+    {
+        swap(__t);
+    }
+
+    // :148
+    // 移动赋值算符重载, 首先会验证自身是否为空, 不为空的情况会调用 terminate 终止进程
+    // 然后以交换的方式进行移动
+    thread& operator=(thread&& __t) noexcept
+    {
+        if (joinable())
+            std::terminate();
+        swap(__t);
+        return *this;
+    }
+
+    // :140
+    // 线程对象析构时, 若自身不为空, 亦会调用 terminate 终止进程
+    ~thread()
+    {
+        if (joinable())
+            std::terminate();
+    }
+
+    // ...
+};
+```
+
+从以上实现可以看出, 线程的移动行为都与 `id` 类型的成员有关, 而这个成员只管理本地句柄. 所以移动线程对象的本质仍然只是表现为数据的句柄资源的移动, 与底层线程的执行没有关系.
+
+需要一提的是 `joinable()` 这个成员函数, 字面意思上来说, 它表示这个线程是否可以 `join()`, 其他函数在执行时会调用之, 以验证线程的状态. 而实际上, 它不仅仅表示此线程对象是否可以 `join()`, 而是表示此对象是否**必须**在失效之前 `join()`.
+
+在上面的代码中, 有两种情况线程会调用 `terminate`, 通常这就意味着进程将退出. 这两种情况, 一是线程对象处在 `joinable()` 时析构, 另一是线程对象处在 `joinable()` 时被当作了另一个线程对象的移动目标. 所以, 如果不在析构之前, 或作为移动来源之前 `join()` 此线程, 程序就会出错退出.
+
+而实际上由于线程对象的移动赋值或析构只是数据上的更改, 因此强行 `terminate` 进程只是 C++ 层面为了满足资源管理语义而制定的要求. 这一点也是 C++11 中的线程对象 API 设计与 Java 等带有自动垃圾回收机制的语言中线程对象设计的另一个显著区别. 在 Java 这样的语言中并没有严格的析构函数语义, 无用对象的回收依赖于虚拟机, 因此这些语言中可以用类似 `new Thread().start()` 的代码在堆上配置一个线程对象, 之后便可置之不理. 而 C++ 中的对象生命周期规则则制约了 `thread` 对象的析构行为, 在 `thread` 析构的前提条件是其内部的 `id` 对象为无效状态.
+
+而使一个线程对象的 `id` 失效的方法包括调用 `join()`. 调用 `join()` 函数有两个后效: 会使得当前线程等待目标线程执行结束 (两个线程不能相同, 即当前线程不能等待自己结束), 以及 `id` 失效. 但一个线程执行结束并不直接意味着对应的线程对象的 `id` 失效. 所以即使确信一个线程对象析构之前该线程有充足的时间执行完毕, 仍然需要调用其 `join` 函数令其 `id` 失效并可以安全析构.
+
+另一个方法是调用该线程对象的 `detach()` 函数, 单方面让该对象管理的 `id` 信息失效, 但不影响当前线程或目标线程的执行状态. 通常这用来实现一个后台守护线程.^[[在主线程结束后, 是否继续执行 `detach` 过的线程是未定义行为. 大部分的操作系统中, 这样的线程将终止, 然后进程退出, 就像 Java 这样有虚拟机支持的语言中的守护线程的行为一样]]
+
+```
+void create_daemon()
+{
+    std::thread t([]()
+            {
+                int i = 0;
+                while (true) {
+                    std::cout << i++ << std::endl;
+                }
+            });
+    t.detach(); // 调用 detach 后, 此线程对象所管理的线程 id 立即失效, 因此可以立即析构
+                // 线程会继续执行, 而主线程不等待线程结束
+}
+
+int main(int argc, char** argv)
+{
+    create_daemon();
+
+    // ...
+
+    return 0;
+}
+```
+
+调用 `join` 和 `detach` 的前提条件是该线程的 `id` 是有效的, 这既可以调用 `joinable()` 函数确认, 也可以调用线程对象的 `get_id()` 成员函数验证其返回值. 无论是 `join` 还是 `detach` 都不能重复地在一个线程对象上调用, 或在一个线程对象先后调用这两个函数. 若有多个线程要同时等待一个线程结束, 则需要其他手段, 后文中将有介绍.

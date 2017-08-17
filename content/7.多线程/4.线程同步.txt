@@ -1,0 +1,342 @@
+在基本类型上进行简单的算术运算使用原子数据类型就足够了, 这一点由编译器和硬件体系结构保证不会发生出现访问冲突. 在复杂一些的情形下, 就需要使用更高阶的线程互斥手段了.
+
+= 互斥量
+
+不过, 在并发访问复杂对象, 尤其是容器时, 一定还是要查看文档, 看看并发到什么程度才需要互斥访问. 比如在本章开头所说的, 即使访问同一个对象, 只要同时读写的内存位置不同, 或者所有线程都只读访问同一个内存位置, 就可以不加限制.
+
+如, 在一个 `vector` (`vector<bool>` 特化除外) 对象上使用 `operator[]`, `at` 同时访问不同下标的元素, 也不会发生数据竞争; 但 `map::operator[]` 则不然, 因为它会在某个键不存在时新建一个键值对, 然后插入到 `map` 对象中去, 这个过程会修改 `map` 内部结构, 故有数据竞争的可能.
+
+而向输出流对象如 `cout` 传入内容时, 单个 `operator<<` 调用是同步的, 但一个线程若要多次调用它来输出一行内容, 就无法保证在输出 `std::endl` 之前不被其他线程插入别的内容. 比如
+
+```
+#include <iostream>
+#include <thread>
+
+void thread_exec(std::string message, int times)
+{
+    for (int i = 0; i < times; ++i) {
+        std::cout << "#" << i << ": " << message << std::endl;
+    }
+}
+
+int main()
+{
+    std::thread a(thread_exec, std::string("I'm the quick fox"), 10);
+    std::thread b(thread_exec, std::string("I'm the lazy dog"), 10);
+    a.join();
+    b.join();
+    return 0;
+}
+```
+
+可能出现类似这样的结果
+
+```
+#0: I'm the quick fox
+#1: I'm the quick fox
+#2: I'm the quick fox
+#3: I'm the quick fox
+#4#0: : I'm the quick fox
+#5: I'm the quick fox
+...
+```
+
+要解决这个问题, 有两个方法, 一是先将要输出的内容先放入一个 `stringstream`, 然后一次输出其内容. 另外就是使用互斥量了^[[这种方法的 CPU 效率一般上不如使用 `stringstream` 先缓存所有待输出内容的方法, 代价是缓冲在 `stringstream` 需要更多的内存资源; 为了更少干涉线程的执行, 之后的例子中不再会对 `cout` 加锁, 而是采用 `stringstream` 缓存的方法]]
+
+```
+#include <mutex>
+
+void thread_exec_using_stringstream(std::string message, int times)
+{
+    for (int i = 0; i < times; ++i) {
+        // 使用 stringstream 缓存所有的输出内容, 再一次性交给 cout
+        std::stringstream ss;
+        ss << "#" << i << ": " << message << std::endl;
+        std::cout << ss.str();
+    }
+}
+
+// 或者使用互斥量; 互斥量应当与需要互斥访问的对象定义在相似的空间内
+// 如此处以全局对象形式出现, 因为 cout 是一个全局可见对象
+std::mutex cout_mutex;
+
+void thread_exec(std::string message, int times)
+{
+    for (int i = 0; i < times; ++i) {
+        cout_mutex.lock();   // 对互斥量上锁
+        std::cout << "#" << i << ": " << message << std::endl;
+        cout_mutex.unlock(); // 一定要记得解锁互斥量
+    }
+}
+```
+
+对 `mutex` 对象调用 `lock` 返回后, 该线程便独占了此对象的锁. 在调用 `unlock` 释放此锁之前, 其他线程调用相同 `mutex` 的 `lock` 会阻塞, 这样就达到了线程同步的目的. 如果线程不愿阻塞等待, 可以调用 `try_lock`, 这个函数会立即返回 `bool` 值表示是否获得了锁.
+
+对互斥量的上锁和解锁的操作一定要配对, 以 C++ 的思维显然这一对操作中解锁一处可以利用 RAII 机制自动进行, 并由此提供异常安全保障. 而在标准库中确实提供了对应的工具
+
+```!
+for (int i = 0; i < times; ++i) {
+    // 定义 lock_guard 对象, 将互斥量作为参数传入, 就不需要再对互斥量上锁或解锁了
+    std::lock_guard<std::mutex> __lk__(cout_mutex);
+    std::cout << "#" << i << ": " << message << std::endl;
+}
+```
+
+模板类型 `lock_guard` 不仅可以为 `mutex` 服务, 也可以为任何正确实现了 `lock()`, `unlock()` 函数的自定义互斥量类型服务, 其对象在构造时锁住目标互斥量, 而析构时解锁之. 这也是 C++ RAII 机制在多线程方面提供的一个便利之处.
+
+需要注意的是, `mutex` 和 `lock_guard` 都是不可复制构造或移动构造的. 不可复制很容易理解, 而不可移动似乎过于严苛了.
+
+所有只能移动构造不可复制的类型都对应于某种资源的管理, 而如果这种资源不存在于对象中, 那么对象应该以默认方式构造. 但上面的例子中可以看到, 可以用来上锁解锁的 `mutex` 实例就是无参数默认构造的, 且它只有这一个构造函数.
+
+实际上, `mutex` 所持有的资源的内容不由用户指定, 换言之, 不同的 `mutex` 虽然各不相同, 但初始化的方式一样, 用户对此没有干涉的余地. 因而 `mutex` 构造函数没有参数, 但一旦构造, 这个对象的状态就是正确的, `lock`, `unlock` 函数就是可用的.
+
+但这样一来, 如果可以把一个 `mutex` 对象移动到另一个 `mutex` 对象中, 那么移动来源在移动后的内容会变成什么, 为 "不持有资源" 的状态吗? 若真的这样定义, 那么每次在上锁或解锁之前, 都需要检查 `mutex` 的有效性, 这样会非常麻烦; 而移动目标原有的内容又会怎样, 设计这些行为也会很复杂. 本着多一事不如少一事的理念, 就将 `mutex` 设定为不可移动的类型了.
+
+而设计 `lock_guard` 为不可移动的类型, 纯粹只是一个规定, 在标准库中就有一个可移动构造且同样为模板的自动上锁解锁的类型叫做 `unique_lock`, 在上面的例子中直接用这个名字替换 `lock_guard`, 语义完全一样. 不过, 正是因为 `lock_guard` 这种 "不能做什么" 的特性, 使得用户在阅读相关的代码会很省心: 这个锁不会被移交到其他地方.
+
+= 哲学家进餐问题
+
+更为复杂一些多线程程序会需要一次锁多个互斥量, 如哲学家进餐这样典型的问题, 在这一点上, 标准库也提供了一些便利.
+
+哲学家进餐问题指的是一组哲学家们围坐在圆桌边, 如果他们都喜欢东方美食的话, 那么每两个哲学家之间置有一只筷子, 因此筷子的数量与哲学家的数量相同. 任何一位哲学家们在进餐时, 会试图先后拿起左手边的筷子和右手边的筷子, 如果筷子已经被其他哲学家拿起, 那么他会等待持有该筷子的其他哲学家进餐完毕后将筷子放回原位后再拿起.
+
+这个模型中哲学家可以被抽象为线程, 而筷子则是需要互斥访问的资源. 而问题的挑战之处则是有可能所有的哲学家都同时拿起了左手边的筷子, 并等待右手边的筷子而造成死锁.
+
+下面的例子演示了模拟 5 名哲学家进餐. 筷子和哲学家都有各自的编号 0-4; N 不为 4 时, 编号为 N 的哲学家左手边的筷子编号为 N 而右手边的筷子编号为 N + 1, 而 4 号哲学家左手边的筷子编号为 4, 右手边的筷子则是 0 号筷子.
+
+```
+#include <iostream>
+#include <sstream>
+#include <vector>
+#include <thread>
+#include <mutex>
+
+// 筷子
+struct Chopstick {
+    int index;
+    // 由于 mutex 不能移动构造, 因此直接把 mutex 作为成员的类型也无法直接移动构造
+    // 为了将互斥量和可移动对象绑定到一起, 最简单的方式就是使用 unique_ptr 存储之
+    std::unique_ptr<std::mutex> mutex{new std::mutex};
+
+    std::mutex& mtx()
+    {
+        return *this->mutex;
+    }
+
+    explicit Chopstick(int i)
+        : index(i)
+    {}
+};
+
+constexpr int NUM_PHILOSOPHERS = 5;
+std::vector<Chopstick> chopsticks;
+
+// 哲学家
+struct Philosopher {
+    int index;
+
+    explicit Philosopher(int i)
+        : index(i)
+    {}
+};
+
+// 线程执行的内容就是一位哲学家进餐
+void dine_thread(Philosopher p)
+{
+    Chopstick& left = chopsticks[p.index];
+    Chopstick& right = chopsticks[(p.index + 1) % NUM_PHILOSOPHERS];
+    std::unique_lock<std::mutex> lock_left(left.mtx());   // 使用 unique_lock 代替 lock_guard
+    std::unique_lock<std::mutex> lock_right(right.mtx()); // 分别对左手边和右手边的筷子上锁
+
+    // 成功获取两只筷子后开始进餐
+    std::stringstream ss;
+    ss << "Philosopher #" << p.index << " start dining after picking up chopsticks #"
+       << left.index << " and #" << right.index << std::endl;
+    std::cout << ss.str();
+}
+
+void dine()
+{
+    std::vector<std::thread> dining;
+    for (int i = 0; i < NUM_PHILOSOPHERS; ++i) {
+        // emplace_back 是 vector 提供的用于在容器末尾进行置位式构造的方法
+        dining.emplace_back(dine_thread, Philosopher(i));
+    }
+
+    for (auto& t: dining) {
+        t.join();
+    }
+}
+
+int main()
+{
+    for (int i = 0; i < NUM_PHILOSOPHERS; ++i) {
+        chopsticks.emplace_back(i);
+    }
+
+    dine();
+    return 0;
+}
+```
+
+这个例子在给互斥量上锁的方式, 正是按照先拿起左手边的筷子, 再拿起右手边的筷子的规程进行的, 并且如果拿起了一边筷子之后, 如果另一边的筷子被其他哲学家占用了, 那么已经拿起来的筷子是不会放下去的. 因而这就是一个典型地可能导致死锁的实现.
+
+而在 C++ 标准库中则提供了一个对多个互斥量一次上锁并且可以避免死锁的函数 `std::lock`, 它接受至少两个可锁的对象作为参数, 并保证
+
+* 通过在这些对象上调用 `lock`, `try_lock`, `unlock` 最终锁住每个参数并返回; 这些成员函数的调用顺序是未定义的
+* 单次调用不会产生死锁
+* 若获取任何一个对象的锁时发生异常, 已锁对象会全部解锁
+* 若至少一个对象的锁无法获得, 则阻塞等待
+
+第一条保障提示了有可能 `std::lock` 在无法获取某个互斥量的锁时会解锁其他已锁的互斥量, 以实现第二条避免死锁的保障.
+
+不过要利用它, 就不能用构造时就自动上锁的 `lock_guard` 了. 而之前提到的 `unique_lock` 则可以稍加修改达到此目的.
+
+```
+void dine_thread(Philosopher p)
+{
+    Chopstick& left = chopsticks[p.index];
+    Chopstick& right = chopsticks[(p.index + 1) % NUM_PHILOSOPHERS];
+    // 增加 std::defer_lock 参数可以阻止 unique_lock 在构造时自动锁住互斥量
+    std::unique_lock<std::mutex> lock_left(left.mtx(), std::defer_lock);
+    std::unique_lock<std::mutex> lock_right(right.mtx(), std::defer_lock);
+    // 调用 lock 去锁住这两个 unique_lock
+    std::lock(lock_left, lock_right);
+
+    // ...
+}
+```
+
+当给 `unique_lock` 提供一个额外的 `defer_lock` (它是 `std::defer_lock_t` 空类型的一个预定义实例, 只用于重载区分) 后, 其构造时就不会立即对参数互斥量进行加锁了, 且允许在之后的代码中再锁住互斥量. 若其生命期内没有对内含的互斥量上锁, 析构时也不会对其解锁. 并且 `unique_lock` 也提供了 `lock`, `try_lock`, `unlock` 这些函数, 因此可以传递给 `std::lock` 加锁.
+
+因此, 上述修改过的 `dine_thread` 函数中, `lock_left` 和 `lock_right` 构造时都并没有立即锁上两只筷子的互斥量, 而在之后一句 `std::lock` 返回后才加锁, 且两个 `unique_lock` 在之后析构时都会解锁互斥量. 经过这样修改后的版本便不会产生死锁了.
+
+除了 `defer_lock`, 标准库还提供了 `std::adopt_lock` 和 `std::try_to_lock` 两个预定义的重载决议对象. 若 `unique_lock` 以 `adopt_lock` 构造, 它不会锁互斥量, 但会认为互斥量已经上锁并在析构时解锁; 若以 `try_to_lock` 构造, `unique_lock` 会以 `try_lock` 方式非阻塞地尝试锁互斥量, 在构造之后, 可以调用其 `owns_lock` 函数检查是否获取了锁.
+
+= 等待与唤醒
+
+在需要多个线程等待某一个线程完成一项任务时, 使用线程的 `join` 或锁都不合适. 在多线程领域中有更好的解决工具用来实现多个线程之间等待与唤醒的行为, 体现在 C++ 标准库中便是 `condition_variable`.
+
+下面这个例子演示了两个线程等待第三个线程从 `std::cin` 输入一个整数, 然后各线程再处理之.
+
+```
+#include <iostream>
+#include <sstream>
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
+
+std::condition_variable input_cond_var; // 定义所有线程可见的 condition_variable
+std::mutex input_mtx;                   // condition_variable 的等待函数要与一个 mutex 配合使用
+std::atomic_int input(0);               // 存放输入的内容
+
+int main()
+{
+    using mutex_lock = std::unique_lock<std::mutex>;
+
+    std::vector<std::thread> vt;
+    vt.emplace_back(
+        []()                            // 消费者线程
+        {
+            // ...
+
+            mutex_lock lk(::input_mtx); // 调用 wait 之前, 要用 unique_lock 锁住 mutex
+            ::input_cond_var.wait(lk);  // 调用 wait 传入此 unique_lock, wait 会解锁 mutex
+            int result = input + 1;
+            std::stringstream ss;
+            ss << "The successor of " << input << " is " << result << std::endl;
+            std::cout << ss.str();
+        });
+    vt.emplace_back(
+        []()                            // 另一消费者线程
+        {
+            // ...
+
+            mutex_lock lk(::input_mtx);
+            ::input_cond_var.wait(lk);  // 同样锁住 mutex 后调用 wait
+            bool result = input < 0;
+            std::stringstream ss;
+            ss << input << " is " << (result ? "" : "not ") << "negative" << std::endl;
+            std::cout << ss.str();
+        });
+    vt.emplace_back(
+        []()                                // 生产者线程
+        {
+            int i;
+            std::cin >> i;                  // 注: 不能直接输入到 atomic 变量中
+            ::input = i;
+            ::input_cond_var.notify_all();  // 数据就绪后, 调用 notify_all 唤醒所有的等待线程
+        });
+
+    for (auto& t: vt) {
+        t.join();
+    }
+    return 0;
+}
+```
+
+这个例子中 `wait` 与 `notify_all` 是一对操作, 不过这种配对不是一个线程对另一个线程, 而是一个 `notify_all` 对应所有其他在同一个 `condition_variable` 上阻塞等待的 `wait`. 如果这种资源是排他的, 只随机唤醒一个消费者, 则应该使用 `notify_one()` 函数.
+
+另外, 在调用 `wait` 之前, 等待数据的线程都要先使用 `unique_lock` 锁上特定的互斥量, 这个互斥量通常与 `condition_variable` 组合使用. 如果没有特别的需求, 可以在调用 `wait` 之前再锁住它, 尽量减少对其他线程的影响.
+
+不过这个例子有个潜在的问题: 如果在上面两个线程 `wait` 之前, 内容就被输入且 `notify_all` 被调用了, 那么 `wait` 就会陷入无限等待中. 为了防止这一错误发生, 应该使用 `wait` 的一个条件重载版本, 并配合一个标志变量使用.
+
+修改的部分如下
+
+```
+std::condition_variable input_cond_var;
+std::mutex input_mtx;
+std::atomic_int input(0);
+// 在所有线程可见处定义一个标志
+std::atomic_bool input_ready(false);
+
+// ...
+
+int main()
+{
+    // ...
+
+    // 调用 wait 的线程作如下修改
+    vt.emplace_back(
+        []()
+        {
+            // ...
+
+            mutex_lock lk(::input_mtx);
+            // ::input_cond_var.wait(lk);
+            // 改为调用下面的重载
+            ::input_cond_var.wait(lk, []() -> bool { return input_ready; });
+
+            // ...
+        });
+
+    // ...
+
+    // 调用 notify_all / notify_one 的线程作如下修改
+    vt.emplace_back(
+        []()
+        {
+            // ...
+
+            // ::input_cond_var.notify_all();
+            // 将 notify_all 的调用变更为
+            {
+                mutex_lock lk(::input_mtx);
+                ::input_ready = true;
+                input_cond_var.notify_all();
+            }
+
+            // ...
+        });
+
+    // ...
+}
+```
+
+`wait` 的一个重载版本让用户提供一个检验条件是否满足的可调用对象, 它的返回值指出该线程是否可以不再等待此 `condition_variable`. 换言之如果该线程执行到此时, `input_ready` 就已经被置为真值, 那么就不再需要等待, 可直接使用输入的值.
+
+而在 `notify_all` 调用处之前, 获取了 `input_mtx` 的锁之后设置 `input_ready` 为真. 这是为了避免当消费者线程在读取 `input_ready` 为非真值和调用 `wait` 等待之间, 生产者插入执行了设置 `input_ready` 为真并唤醒这一过程, 导致之后 `wait` 仍然会无限等待.
+
+以上便是 C++11 中提供的各种基本的多线程相关的 API 了. 这些 API 在 POSIX 线程库中不乏有相近的面孔, 有些实践也早已广泛运用于生产中, 并不是 C++ 中发明的新事物. 而并发程序设计最根本的部分, 则是拆解任务的方法, 调试排错手段等, 这些还需读者在实践中根据具体情况选择正确的方式了.

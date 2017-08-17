@@ -1,0 +1,157 @@
+在 C 和 C++ 里有两类循环语句, 一是 `while` 或 `do`-`while`, 另一是 `for` 循环. 相对于 `while` 系的按单一条件循环的语法, `for` 的不同之处在于多出了迭代初始化和迭代变更两个成分. 如
+
+```
+size_t const SZ = 10;
+int arry[SZ];
+for (size_t i = 0; i < SZ; ++i) {
+    arry[i] = i * 2 + 1;
+}
+
+// 等价于以下 while 循环
+
+size_t j = 0;
+while (j < SZ) {
+    arry[j] = j * 2 + 1;
+    ++j;
+}
+```
+
+由于开发者之间对循环的功能达成了共识, 上述 `for` 循环一眼就能看出来是在逐个访问数组的每个元素, 因此相对于使用 `while`, `for` 循环在语义上更为明确, 容易理解.
+
+不过, 在 C++ 中由于标准容器的引入, 这种 `for` 循环会由于一些容器类型无法按照索引下标随机访问而无法使用.  因此标准库中设立了迭代器 (iterator) 的机制来帮助用户遍历任何容器中的元素. 如
+
+```
+std::set<int> s;
+
+for (size_t i = 0; i < s.size(); ++i) {
+    // 编译错误: std::set 集合类型不具备按照下标随机访问的能力
+    int val = s[i];
+}
+
+for (std::set<int>::iterator i = s.begin(); i != s.end(); ++i) {
+    // 正确: 通过迭代器访问元素
+    int val = *i;
+    std::cout << val << std::endl;
+}
+```
+
+相对而言这种写法还是容易接受的. 不过, C++11 中又设计了一个新语法, 让针对容器迭代语义进一步简化. 这种基于范围的循环 (range-based loop) 语法如下
+
+```
+std::set<int> s;
+
+// 在 for 关键字的括号中使用
+// 类型名 标识符 冒号 (:) 要进行迭代的容器 (任何表达式)
+// 这一写法与上面传统的 for 循环写法完全等价
+for (int val: s) {
+    std::cout << val << std::endl;
+}
+```
+
+编译器处理这一语法的机制实际上就是调用给定的容器表达式的 `begin()` 和 `end()` 函数产生迭代器对象, 然后调用迭代器对象的寻址算符重载 (前置 `operator*()` 重载) 获得相应的元素, 赋值给 `for` 的括号里定义的标识符.
+
+如果提供容器的表达式是个函数调用, 这个调用只会被执行一次. 换言之, 这个表达式只会在循环开始前被求值一次.
+
+```
+std::vector<std::string> make_vector()
+{
+    std::cout << "call make_vector" << std::endl;
+    std::vector<std::string> x;
+    x.push_back("hello");
+    x.push_back("world");
+    return x;
+}
+
+for (std::string s: make_vector()) {
+    std::cout << "s= " << s << std::endl;
+}
+
+// 等价于以下代码, make_vector() 函数调用只有一次
+std::vector<std::string> __ranged_for_loop_expr(make_vector());
+for (std::vector<std::string>::iterator i = __ranged_for_loop_expr.begin();
+     i != __ranged_for_loop_expr.end();
+     ++i)
+{
+    std::string s = *i;
+    // ...
+}
+
+/* 输出
+
+call make_vector
+s= hello
+s= world
+
+*/
+```
+
+另外, 像上面这样写, 每次迭代返回的 `std::string` 对象都会被复制到循环中定义的 `s` 变量里去, 这当然有些性能损耗. 在不需要复制的情况下, 可以将这一变量定义为引用.
+
+```
+// 以引用的方式使用迭代的元素
+for (std::string const& s: make_vector()) {
+    std::cout << "s= " << s << std::endl;
+}
+
+// 也可以去掉引用的 const 限制; 这样的话, 循环体中更改引用意味着直接修改了容器内元素的内容
+std::vector<std::string> v(make_vector());
+for (std::string& s: v) {
+    s += " !";
+}
+
+for (std::string const& s: v) {
+    std::cout << "s= " << s << std::endl;
+}
+
+/* 更改了元素之后, 以上一个 for 循环的输出为
+
+s= hello !
+s= world !
+
+*/
+```
+
+然而, 这一方便的新特性并没有顾及到逆向迭代, 也就是说无法通过逆向迭代器 (reverse iterator) 对容器内容进行循环. 不过, 可以在需要的时候加上这样一套工具类型 (需要用户自己添加; STL 中直到 C++17 都没有提供)
+
+```
+template <typename C>
+struct reverse_iteration {
+    C& c;
+    reverse_iteration(C& c_): c(c_) {}
+
+    // 其 begin end 函数返回所引用的容器的 rbegin() rend() 以产生逆向迭代器
+    typename C::reverse_iterator begin() { return c.rbegin(); }
+    typename C::reverse_iterator end() { return c.rend(); }
+};
+
+template <typename C>
+struct reverse_iteration<C const> { // 针对 const 限定的偏特化
+    C const& c;
+    reverse_iteration(C const& c_): c(c_) {}
+
+    // 此偏特化使用 const_reverse_iterator
+    typename C::const_reverse_iterator begin() { return c.rbegin(); }
+    typename C::const_reverse_iterator end() { return c.rend(); }
+};
+
+template <typename C>
+reverse_iteration<C> make_reverse(C& c)
+{
+    return reverse_iteration<C>(c);
+}
+
+std::vector<std::string> v(make_vector());
+for (std::string const& s: make_reverse(v)) {
+    std::cout << "s= " << s << std::endl;
+}
+
+/* 输出
+
+call make_vector
+s= world
+s= hello
+
+*/
+```
+
+从这个例子中也可以看出, 如果用户自己实现了一个容器类型, 或者哪怕是上述这样的包装类型, 只要有合适的 `begin()` 和 `end()` 成员函数实现, 就能用在基于范围的循环语法中.

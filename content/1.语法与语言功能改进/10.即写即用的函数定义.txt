@@ -1,0 +1,244 @@
+C++11 新增的较为复杂的一个新语法就是 lambda 函数对象. 在本节中将简单介绍如何使用基本的 lambda 语法替代一般函数.
+
+在标准库中提供了许多便利的算法函数, 这些算法函数允许用户传入指定的函数作为算法的策略. 比如最常用的算法函数之一的 `std::sort`, 它允许用户传入一个比较器, 表示如何比较两个对象以决定它们的顺序. 例如
+
+```
+#include <iostream>
+#include <algorithm>
+#include <vector>
+
+struct Person {
+    int age;
+    std::string name;
+
+    Person(int a, std::string const& n)
+        : age(a)
+        , name(n)
+    {}
+};
+
+// 根据两个属性分别排序的函数
+bool cmp_by_age(Person const& lhs, Person const& rhs)
+{
+    return lhs.age < rhs.age;
+}
+
+bool cmp_by_name(Person const& lhs, Person const& rhs)
+{
+    return lhs.name < rhs.name;
+}
+
+int main()
+{
+    std::vector<Person> p{
+        {24, "lisi"},
+        {23, "zhangsan"},
+        {25, "wangwu"},
+    };
+    std::sort(p.begin(), p.end(), cmp_by_age);
+    for (auto const& x: p) {
+        std::cout << x.name << " : " << x.age << std::endl;
+    }
+    /* 输出
+    zhangsan : 23
+    lisi : 24
+    wangwu : 25
+    */
+
+    std::sort(p.begin(), p.end(), cmp_by_name);
+    for (auto const& x: p) {
+        std::cout << x.name << " : " << x.age << std::endl;
+    }
+    /* 输出
+    lisi : 24
+    wangwu : 25
+    zhangsan : 23
+    */
+    return 0;
+}
+```
+
+虽然这样可以实现功能, 但显然, 将 `cmp_by_age` 对 `cmp_by_name` 分离为单独的函数违背了函数的本意 --- 之所以分离出单独定义的函数是为了代码重用和逻辑封装. 而在本例中, 对象的比较方法作为排序逻辑的一环, 本应在 `sort` 的调用处, 单独定义成全局函数反而割裂了代码逻辑.
+
+再试想实现下面这一逻辑: 在容器中找到第一个 `age` 小于 20 的对象, 如果使用标准库中的 `find_if`, 应写为
+
+```
+bool age_less_than_20(Person const& p)
+{
+    return p.age < 20;
+}
+
+// ...
+std::vector<int> p;
+// ...
+auto i = std::find_if(p.begin(), p.end(), age_less_than_20);
+if (i != p.end()) {
+    std::cout << i->name << " : " << i->age << std::endl;
+}
+```
+
+然而想必不会有人这么死脑筋, 相对于下面这样的 for 循环, 上面的写法实在是太繁琐了^[[可以认为这是标准库的用户心中的算计和权衡: 像 `sort`, `set_intersection` 这样的算法函数, 即使需要在其他地方定义冗长的函数也无妨, 因为这些算法本身更复杂; 而像 `find_if`, `count_if` 甚至如 `for_each` 这样的函数则不然, 通常情况下, 一个 for 循环足以替代相应的功能]]
+
+```
+for (auto const& x: p) {
+    if (x.age < 20) {
+        std::cout << x.name << " : " << x.age << std::endl;
+        break;
+    }
+}
+```
+
+而在 C++11 中, 用户可以用 lambda 匿名函数这一更简洁的方式来编写并使用这个函数指针, 下面就用这种方法改写上面的例子
+
+```
+int main()
+{
+    std::vector<Person> p{
+        {24, "lisi"},
+        {23, "zhangsan"},
+        {25, "wangwu"},
+    };
+
+    // 使用匿名函数作为 sort 的比较器参数
+    // 这是一个函数, 它以一对方括号开头, 之后是参数列表, 然后是花括号括起的函数体
+    // 但它没有名字, 故被称作匿名函数
+    std::sort(p.begin(), p.end(),
+            /* 从这里开始 */
+            [](Person const& lhs, Person const& rhs) // (a)
+            {
+                return lhs.age < rhs.age;
+            }
+            /* 到这里结束 */
+    );
+    for (auto const& x: p) {
+        std::cout << x.name << " : " << x.age << std::endl;
+    }
+    /* 输出
+
+    zhangsan : 23
+    lisi : 24
+    wangwu : 25
+
+    */
+
+    std::sort(p.begin(), p.end(),
+            [](Person const& lhs, Person const& rhs) // (b)
+            {
+                return lhs.name < rhs.name;
+            }
+    );
+    for (auto const& x: p) {
+        std::cout << x.name << " : " << x.age << std::endl;
+    }
+    /* 输出
+
+    lisi : 24
+    wangwu : 25
+    zhangsan : 23
+
+    */
+
+    // 类似地, 也可以使用匿名函数作为 find_if 的筛选条件参数
+    auto i = std::find_if(p.begin(), p.end(),
+            [](Person const& x)                      // (c)
+            {
+                return x.age < 20;
+            }
+    );
+    if (i == p.end()) {
+        std::cout << "no such person" << std::endl;
+    }
+    /* 输出
+
+    no such person
+
+    */
+
+    p.push_back(Person(16, "xiaoliu"));
+
+    auto j = std::find_if(p.begin(), p.end(),
+            [](Person const& x)                      // (d)
+            {
+                return x.age < 20;
+            }
+    );
+    if (j != p.end()) {
+        std::cout << j->name << " : " << j->age << std::endl;
+    }
+    /* 输出
+
+    xiaoliu : 16
+
+    */
+
+    return 0;
+}
+```
+
+(a) (b) (c) (d) 各处就是这一新语法. 该语法以一对方括号开头, 接下来圆括号中是函数的形参列表, 它是可选的, 若被省略, 表示该函数对象调用时不需要参数. 最后花括号之间的部分就是函数对象的函数体, 当然它是必要的. 还有一个被省略的成分是返回值类型, 它默认由 `return` 语句中返回的表达式类型推导, 若要显式写上, 须写成后置形式, 如
+
+```
+[](Person const& lhs, Person const& rhs) -> bool
+{
+    return lhs.age < rhs.age;
+}
+```
+
+从语法来说, 这样做相当于定义了一个匿名函数, 然后将该函数的函数指针作为此处表达式的值. 因此, 它也适用于各种需要函数指针的场合. 典型地, 当编写一个有计算器机能的程序时, 可能要将算符字符串映射到不同的运算函数, 使用 lambda 可以实现为
+
+```
+int main()
+{
+    using fn = int(*)(int, int);
+
+    std::map<std::string, fn> op_map{
+        {"+", [](int x, int y) { return x + y; }},
+        {"-", [](int x, int y) { return x - y; }},
+        {"<<", [](int x, int y) { return x << y; }},
+    };
+
+    std::cout << op_map["+"](1, 2) << std::endl;    // 3
+    std::cout << op_map["-"](3, 4) << std::endl;    // -1
+    std::cout << op_map["<<"](5, 6) << std::endl;   // 320
+    return 0;
+}
+```
+
+需要注意的是, 虽然语法上整个 lambda 都写在函数体内部, 但它并不能看作是一个局部变量, 也因此, 一些对于局部变量的约束对 lambda 而言并不成立. 比如, 函数不应该返回局部变量的引用或指向此局部变量的指针, 但可以返回定义在局部的 lambda.
+
+```
+int* return_local_ptr()
+{
+    int x = 0;
+    return &x;  // g++ 会给出一个警告, 返回了局部变量的地址
+}
+
+using fn_type = int(*)(int);
+
+fn_type return_lambda()
+{
+    return [](int x) { return x + 1; }; // 而返回一个 lambda 是完全允许的
+}
+
+int main()
+{
+    fn_type f = return_lambda();
+    std::cout << f(1) << std::endl; // 输出 2
+    return f(-1);
+}
+
+// 实际上, 上述 return_lambda 函数等价于先定义一个匿名全局函数, 然后返回该函数指针, 故这一做法是完全合理的
+// 即等价于以下写法
+
+int __anonymous_function__(int x)
+{
+    return x + 1;
+}
+
+fn_type return_lambda_()
+{
+    return __anonymous_function__;
+}
+```
+
+在以上的例子中, 所有 lambda 对象都被可以向函数指针类型直接转换, 不过, 这并不表示 lambda 都是函数指针. 实际上, 默认情况下它更类似于一个函数对象, 即各种定义了 `operator()` 重载的类型的实例. 有关 lambda 更准确的解释和更进阶的使用方法, 将在 "函数对象" 一章详细介绍.

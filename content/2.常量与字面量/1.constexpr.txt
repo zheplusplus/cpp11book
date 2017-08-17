@@ -1,0 +1,300 @@
+除了使用枚举类型, 在 C++ 中也可以使用 `const` 来定义常量, 并且除了整数类型的常量, 它也可以作用于其它类型, 如 `double` 浮点数等.
+
+不过, 使用 `const` 来限定一个名字, 其初衷只是表示其无法修改, 而若其以常数初始化, 那么编译器认为被定义的名字表示一个常量 (当然常量必然无法修改). 这会产生一定的二义性, 并在给一些代码带来麻烦, 比如
+
+```
+template <int I>
+class A {};
+
+void f()
+{
+    int const N = 5;
+    A<N> a; // 合法: 编译器认为 N 是编译时常量
+}
+
+void g()
+{
+    int n = 5;
+    int const M = n;
+    A<M> a; // 不合法: 编译器认为 M 只是一个无法修改的量
+}
+```
+
+而在 C++11 中, 一个新的用来定义编译时常量的机制加入了标准. 标准引入了 `constexpr` 这一关键字以区分 `const` 关键字, 使用这一关键字定义的值必须是编译时常数, 因而可以用于定义固定长度的数组, 或像上例中那样特化模板, `static_assert`, 以及任何需要一个常数的地方. 这一机制的另一个方面是允许通过函数计算返回一个编译时常数, 即使用 `constexpr` 关键字定义的函数在参数都为常数的情况下返回的值也可以被认为是一个常数.
+
+而如果使用了 `constexpr` 无法定义出一个常数, 或者 `constexpr` 修饰的函数不满足某些条件, 那么编译器会立即报错. 这也避免了出现 `const` 那样不明确的语义.
+
+= 基本语法和使用
+
+使用 `constexpr` 修饰一个名字定义, 让它一定是编译时常数, 写法是将 `constexpr` 关键字放在定义语句的开头.
+
+```
+constexpr int N = 5;        // 定义 N 为常量 5
+
+template <int I>
+class A {};
+A<N> a;                     // 可以用于特化模板
+
+static_assert(N == 5, "");  // 可以用于 static_assert
+```
+
+与 `const` 不同的是, 它必须由其他编译时常数在定义处立即初始化, 不能用于声明形式参数. 另外, 如果用作定义类的成员, 它必须是 `static` 修饰的.
+
+```
+int x = 0;
+const int y = x;                // 这样写是允许的
+
+int m = 0;
+constexpr int n = m;            // 错误: 初始值 m 不是一个编译时常数
+
+void f(constexpr int N) {}      // 错误: 不能作为参数
+
+struct X {
+    constexpr int M = 6;        // 错误
+    constexpr static int M = 6; // 正确: 必须带上 static 修饰
+};
+```
+
+其中的理由也不复杂: 使用 `constexpr` 就是在定义编译时常量, 因此编译器当然需要一个常量去初始化它; 并且类型的各个实例也没有必要共享一个编译时常量, 声明为静态是合适的做法. 而如果在函数体内定义一个 `constexpr` 修饰的量, 它自动获得 `static` 修饰, 无须显式写出. 当然, 一般而言这些常量并不会真的被编译器放入程序的静态存储区, 它们往往在编译时就被替换为常数了.
+
+除了用来定义常量, `constexpr` 关键字也可以用来修饰函数. 修饰全局或静态函数时, 表示这个函数在参数都为常量时将返回一个常量. 比如
+
+```
+constexpr int square(int x)
+{
+    return x * x;
+}
+
+// 也可以修饰模板函数
+template <typename T>
+constexpr T cube(T x)
+{
+    return x * x * x;
+}
+
+constexpr int I = square(5);     // 25
+constexpr int K = cube(-5);      // -125
+constexpr double L = cube(1.6);  // 4.096
+```
+
+也就是说, 上面这些函数调用实际上由编译器自己执行并计算出了结果, 然后当作编译时常量使用.
+
+这样定义的函数也能在参数不为常量时使用, 不过这样的话, 返回值也就不能作为常量看待了
+
+```
+int x = 5;
+int y = cube(x);        // 正确: 参数 x 不是编译时常量, 但是可用来调用 cube, 其结果被视为变量
+constexpr z = cube(x);  // 错误: 参数 x 不是编译时常量, 调用 cube 返回的结果不被认可为常量
+```
+
+在以上例子中的 `constexpr` 函数都比较简单, 不过实际上, `constexpr` 修饰函数时, 有一些规则迫使它**必须**这么简单. 这些规则是
+
+* 调用时必须已经给出完整定义而非前导声明
+* 非构造函数的 `constexpr` 函数只能包括一条 `return` 作为非编译时语句 ("编译时语句" 是笔者的造语, 指代如 `static_assert`, `typedef`, `using`, `enum` 等只在编译时产生效果的语句)
+* 构造函数的初始化列表中的表达式, `return` 的表达式中, 只能引用 a) 参数 b) 编译时常量 c) 其他 `constexpr` 函数调用 d) 以上项目的运算或成员 (有运算符重载的情况视作 c 项)
+
+第一条规则是理所当然的, 它保证编译器知道这一函数的定义并能够在编译时模拟执行它.
+
+而接下来一条规则就非常严苛了, 甚至这样的代码也不会被认可^[[在 C++14 中这一约束被放宽了, 允许函数在栈上定义 `const` 量或使用简单的分支语句]]
+
+```
+constexpr int successor(int x)
+{
+    constexpr int C = 1; // 可以将这一句改为 enum {C = 1}; 通过编译
+    return x + C;
+}
+```
+
+最后一条规则中约束了这些函数能使用的值也应该都是常数, 毕竟要在编译时执行这些代码. 并且, 函数调用中如果有其他函数也不会产生其他效果, 因为被调用的那些也都是 `constexpr` 函数.
+
+说到这里不得不提, 所有的数学库函数都**不**是 `constexpr` 修饰的. 比如求平方根, 虽然理论上来说完全可以在编译时求得任何常数的平方根, 但实际上 `sqrt` 函数的实现中有产生副作用的可能性, 因为在参数为负数时, `errno` 会被设置 `EDOM` 表示发生了一个定义域错误.
+
+不过这些也只是一些说辞. 在不考虑定义域的情况下, 自行定义 `constexpr` 求平方根函数并不是不可能
+
+```
+// 使用二分法求平方根
+// PRECISION 值为精度要求
+constexpr double PRECISION = 1e-3;
+
+// 猜测值 guess 的平方和原参数 x 小于在容许范围内, 也就是小于精度要求时, 认为此猜测值足够好
+constexpr bool good_enough(double x, double guess)
+{
+    // | x - guess * guess | < PRECISION
+    return -PRECISION < x - guess * guess && x - guess * guess < PRECISION;
+}
+
+// 如果猜测值 guess 足够好就返回它, 否则, 递归求更精确的值
+constexpr double sqrt_impl(double x, double guess)
+{
+    return good_enough(x, guess) ? guess : sqrt_impl(x, (guess + x / guess) / 2);
+}
+
+// 求平方根的功能入口, 以 1.0 作为初始猜测值
+constexpr double sqrt_c(double x)
+{
+    return sqrt_impl(x, 1.0);
+}
+
+constexpr double X = sqrt_c(2); // 约为 1.41422
+constexpr double Y = sqrt_c(3); // 约为 1.73214
+```
+
+从上面这一连串的 `constexpr` 函数也可以看出在严格的规则约束下能做到什么程度. 譬如使用 `?:` 三目算符替代分支语句, 包括使用递归都是允许的. 不过如果递归的次数过深, 编译器会选择报一个错误, 避免在可能实际上有缺陷的代码中越陷越深. 譬如, 利用上述代码求 `sqrt_c(-2)` 时, 在 `sqrt_impl` 中是会无限递归的, 这时会以编译错误收场.
+
+= 自定义常量类型
+
+引入 `constexpr` 的好处除了区分一般 `const` 而获得更明确语义, 和使用函数计算常量之外这两点之外, C++11 还允许自定义常量的类型. 举个例子, 下面这种代码也是可行的
+
+```
+struct Vector2d {
+    double x;
+    double y;
+
+    constexpr Vector2d(double xx, double yy) // (a) constexpr 修饰的构造函数
+        : x(xx)
+        , y(yy)
+    {}
+
+    constexpr double length() const          // (b) constexpr 修饰的成员函数
+    {
+        // 使用刚才例子中的 sqrt_c
+        return sqrt_c(x * x + y * y);
+    }
+};
+
+constexpr Vector2d v{3.0, 4.0};              // (c) 使用上面定义的 Vector2d 定义常量 v
+constexpr double x = v.x;                    // (d) 使用常量 v 的属性定义常量 x
+constexpr double len = v.length();           // (e) 使用常量 v 计算得出常量 len
+```
+
+这个例子中, `Vector2d` 这个类型定义的内部有两个带有 `constexpr` 修饰的函数, 一是其构造函数, 另一个是非静态成员函数. 然后定义了 `Vector2d` 的实例 `v`, 它以 `constexpr` 修饰, 其被认为是一个编译时常量; 然后, 使用其成员去初始化常量 `x`, 或调用其成员函数 `length()` 得到常量返回值去初始化 `len`.
+
+例子中多次出现了 `constexpr`, 不过其中的内在联系很清晰, 它们是这样的
+
+* 自定义一个可以被用作常量的类型, 那么它必须有至少一个 `constexpr` 构造函数 (a)
+* 应当使用有 `constexpr` 构造函数来构造被定义为常量的实例 (c), 当然, 这时传给构造函数的实参必须全部是常量
+* 当一个自定义类型的实例被定义为常量后, 它的成员将都被视作常量 (d) (除了 `mutable` 修饰的成员, 它们仍然被视作一般变量)
+* 由于常量对象的各成员都被视作常量, 因此在这些成员上的运算, 或使用这些成员调用其他 `constexpr` 函数, 得到的也将是一个常量; 并且, 可以使用 `constexpr` 修饰成员函数, 让它在对象本身是常量时尽可能返回一个常量 (b)
+* 对常量对象调用其 `constexpr` 修饰的成员函数能得到一个常量 (e)
+
+反过来说, 如果上面 (a) 处构造函数的 `constexpr` 被去掉, 那么 (c) 处就无法编译通过, 连带 (d) (e) 也出错; 而如果去掉 (b) 处成员函数的 `constexpr`, 那么 (e) 处调用 `v.length()` 将不被认为得到的是一个编译时常量, 因而初始化 `len` 时产生一个错误.
+
+使用 `constexpr` 修饰成员函数的基本规则跟修饰一般函数差不多, 也是只能有一条 `return` 语句, 其表达式用到的只能是参数或者其他常量等等, 不过还加上一条, 就是可以使用对象自身非 `mutable` 的成员. 另外, `constexpr` 修饰的成员函数在 C++11 标准中自动带有 `const` 修饰, 但在 C++14 标准中去掉了这一规则, 所以在写代码时最好还是显式写上 `const`.
+
+而使用 `constexpr` 修饰构造函数的规则就不太一样了: 首先, 构造函数并不需要 `return` 一个值, 于是函数体内不允许有任何非编译期语句; 构造函数的重点在其初始化列表, 如果调用委托构造函数或父类的构造函数, 那么被委托的构造函数或其父类的对应构造函数必须也是 `constexpr` 修饰的; 调用其他构造函数的参数表达式, 或其他成员的初始化表达式中, 所有用到的部分也都必须是常量, 与约束一般 `constexpr` 函数 `return` 表达式的规则相同.
+
+除了以上作用于各个函数上的规则, 用来定义常量的类型本身还有其他要求. 在 C++11 中, 描述能够用来定义常量的类型的术语是**字面类型** (literal type), 所有的基本数据类型都是字面类型, 而自定义字面类型, 则必须满足以下条件
+
+* 该类有至少一个非复制构造函数是 `constexpr` 修饰的
+* 该类型有一个平凡的析构函数, 它的每个基类和非静态成员也须递归地满足这个要求
+
+第一条规则在前面中已经说过了, 如果没有 `constexpr` 修饰的构造函数, 那么无法合理地初始化这一常量对象. 而第二条规则是有关编译器如何对待常量的. 对于常量, 编译器可能只在编译时使用它们, 因此, 这个对象可能不会存在于运行时, 也就不会被析构, 这就需要一条约束, 使得这个对象即使不析构也不产生任何问题.
+
+如果不满足字面类型的定义, 那么用此类型就无法定义常量. 比如字符串类型 `std::string`, 它的析构函数会释放其所持有的堆上资源, 因此不是字面类型
+
+```
+constexpr std::string S("hello, world");  // 错误: string 不是一个字面类型
+constexpr size_t sz = S.size();           // 连带错误: string::size() 也不可能是常量
+```
+
+字面类型除了用来直接定义常量之外, 也可以作为 `constexpr` 函数的参数类型或返回值类型使用. 比如
+
+```
+constexpr Vector2d multi(Vector2d const& a, double times)
+{
+    return Vector2d(a.x * times, a.y * times);
+}
+
+constexpr Vector2d m = multi(Vector2d{1, 2}, 2);
+constexpr double xx = m.x; // 2.0
+constexpr double yy = m.y; // 4.0
+```
+
+或者, 将这一功能定义为算符重载, 显得更简洁
+
+```
+struct Vector2d {
+    // ...
+
+    // 算符重载成员函数也可以加上 constexpr 修饰, 与其他成员函数规则一样
+    constexpr Vector2d operator*(double times) const
+    {
+        return Vector2d(x * times, y * times);
+    }
+};
+
+constexpr Vector2d m = Vector2d{1, 2} * 2;
+constexpr double xx = m.x; // 2.0
+constexpr double yy = m.y; // 4.0
+
+// constexpr 也可以用于定义全局的算符重载, 与其他全局 constexpr 函数规则一样
+constexpr Vector2d operator*(double times, Vector2d const& a)
+{
+    return a * times;
+}
+```
+
+需要指出的是, 若 `constexpr` 修饰一个泛型函数, 其泛型参数用非字面类型特化时, 不构成编译错误, 只不过, 这一特化退化为非 `constexpr` 修饰的.
+
+比如标准库中, `std::pair` 泛型类的构造函数是 `constexpr` 修饰的, 这意味着在使用两个字面类型特化 `std::pair` 模板类型的情况下, 其实例可以是常量
+
+```
+constexpr std::pair<int, Vector2d> velocity{70, Vector2d{1, 0}};
+constexpr int speed = velocity.first;               // 70
+constexpr bool toward_east = velocity.second.x > 0; // true
+```
+
+当然谁也不能料定模板参数类型不含 `string` 之类的非字面类型, 因此需要有这条规则保证在这种情况下不出现编译错误.
+
+```
+// 正确
+std::pair<int, std::string> x{0, ""};
+
+// 错误: 特化出的 pair<int, string>(int, string) 构造函数退化为非 constexpr 函数
+constexpr std::pair<int, std::string> y{0, ""};
+```
+
+= 优化意义上的 `constexpr` 函数
+
+在上面的介绍中指出了 `constexpr` 与字面类型之间的联系. 一个 `constexpr` 函数的返回值类型和各形式参数类型, 如果不是模板类型参数, 那么必须都是字面类型. 理由也很明显, 因为这些函数可用以定义只存在于编译期的常量, 因此, 它们不应该有非平凡的析构函数.
+
+不过相对于其他函数而言, 构造函数有点特殊, 它并没有返回值. 更准确地说, 构造函数在给定地址空间上进行的一系列初始化对象的行为, 虽然将对象构造的调用放在表达式里其值是这个对象, 但这个构造调用并没有 "返回" 一个对象. 这样一来, 如果一个非字面类型的构造函数的各个参数类型是字面类型, 并且满足其他 `constexpr` 修饰函数时的规则, 那么这个构造函数仍然可以是 `constexpr` 修饰的.
+
+比如, 实现一个这样的指针包装类型
+
+```
+class IntPtr {
+    int* ptr;
+public:
+    // 此类型实例内部的 ptr 指向堆上空间
+    explicit IntPtr(int x)
+        : ptr(new int(x))
+    {}
+
+    // 析构时, 需要归还堆上空间
+    // 因此, 这不是一个字面类型
+    ~IntPtr()
+    {
+        delete ptr;
+    }
+
+    IntPtr(IntPtr const&) = delete; // 简单起见, 不允许复制
+
+    // 但是, 其某些构造函数可以是 constexpr 修饰
+    // 如下面这个, 满足 constexpr 构造函数的各个规则约束就行
+    constexpr IntPtr()
+        : ptr(nullptr)
+    {}
+};
+
+constexpr IntPtr p; // (a) 编译错误: IntPtr 不是字面类型不能用来定义常量
+IntPtr q;           // (b) 编译通过
+```
+
+上面例子中, `IntPtr` 类型虽然不是字面类型, 但可以拥有 `constexpr` 修饰的构造函数; 然而, 即使有 `constexpr` 修饰的构造函数, 却不能用这个构造函数定义常量, 因此 (a) 处无法编译.
+
+这样绕来绕去的, 看起来这好像是绕过规则而产生的一个漏洞, 但它仍然是有意义的.
+
+实际上, 当一个函数被 `constexpr` 修饰时, 其真正的作用是, 若该其参数为编译时常数, 那么编译器会将直接编译时初始化该函数返回的对象地址空间, 即有可能的话, 编译器会在编译时计算将该函数的返回值, 然后生成直接写入常数的代码, 减少运行时开销. 这使人感觉像一个更加高级的 `inline` 修饰, 反而跟编译时常量关系不大, 只不过恰好利用函数计算编译时常量可以藉由这样的函数来完成. 而用 `constexpr` 修饰非字面类型的构造函数 (或字面类型的构造函数) 就是仅运用了这一高级 `inline` 机制, 避免构造函数调用开销, 生成直接将实例的各成员的值设为常数的运行时代码. 因此如果程序执行到上述代码的 (b) 处, 它并不会调用构造函数, 而是根据构造函数的指示, 直接在对象的地址上写入一个空指针的值, 对于 x64 架构而言, 就是填上 8 字节的零.
+
+所以, 即使不是用来定义常量, 也可以将一些简单的函数定义为 `constexpr` 函数, 让编译器尽情优化之.

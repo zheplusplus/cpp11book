@@ -1,0 +1,86 @@
+另一可能的需求是防止类型被继承, 在 C++03 中的技巧是将构造函数定义为 `private` 限定, 这样子类无法构造父类部分. 而后对外暴露工厂函数以产生对象. 如
+
+```
+struct DontInherit {
+    // 对外暴露工厂方法产生实例
+    static DontInherit construct()
+    {
+        return DontInherit();
+    }
+private:
+    // 将自身构造函数设为私有的
+    DontInherit() {}
+};
+
+struct SubClass: DontInherit {
+    // 在子类中, 这一无参默认构造函数将不会被隐式生成
+    // 手动加上此构造函数也无法编译
+    // SubClass() : DontInherit() {}
+};
+
+int main()
+{
+    // DontInherit 的实例化要借助于工厂方法
+    DontInherit d = DontInherit::construct();
+
+    // 但子类将无法实例化, 此处编译失败
+    SubClass s;
+    return 0;
+}
+```
+
+在 C++11 中, 不允许类型被继承这一特性直接被编译器所支持, 新引入的关键字为 `final`, 与 Java, C# 等语言中的基本一致 (除了关键字摆放的位置). 它除了可以禁止类型被继承, 也能禁止单一虚函数被覆盖. 其语法如下
+
+```
+struct Animal {
+    virtual void say() = 0;
+    virtual void breed() = 0;
+    virtual ~Animal() {}
+};
+
+struct Bird : Animal {
+    // 在虚函数后加上 final 关键字, 该虚函数无法被子类覆盖
+    void breed() final { std::cout << "lay eggs" << std::endl; }
+};
+
+// 在类名后加上 final 关键字, 该类无法被继承
+struct Duck final : Bird {
+    void say() { std::cout << "ga" << std::endl; }
+
+    // 编译错误: 基类的 breed 是 final 的
+    void breed() {}
+};
+
+// 编译错误: Duck 是 final 的
+struct DonaldDuck : Duck {};
+```
+
+这一特性有助于编译器执行优化. 若子类将其某个虚函数标记为 `final` 修饰, 或者该子类本身是 `final` 修饰的, 那么这些成员函数的调用将被编译器视为非虚函数调用, 这样就不必在运行时去查找虚表了.
+
+除了 `final` 关键字之外, 另一与虚函数有关的关键字 `override` 可以用来确定当前定义的函数是否覆盖了父类的虚函数. 这一关键字不是必须的, 加上的话有助于检查虚函数签名的正确性.
+
+```
+struct Animal {
+    virtual void say() = 0;
+    virtual void breed() = 0;
+    virtual ~Animal() {}
+
+    void drink() {}
+};
+
+struct Bird : Animal {
+    // 正确: 此函数覆盖了父类中声明的 void breed() 函数
+    void breed() override { std::cout << "lay eggs" << std::endl; }
+
+    // 编译错误: 此函数签名与父类中的 breed 函数不同, 多了 int 参数
+    void breed(int x) override
+    { std::cout << "lay " << x << " eggs" << std::endl; }
+
+    // 编译错误: 此函数签名与父类中的 breed 函数不同, 多了 const 限定
+    void breed() const override
+    { std::cout << "lay eggs" << std::endl; }
+
+    // 编译错误: 父类中的 drink() 函数并不是虚函数
+    void drink() override {}
+};
+```

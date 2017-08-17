@@ -1,0 +1,324 @@
+= 统一的对象初始化语法
+
+C++11 开始统一千奇百怪的对象初始化语法了, 同时各种 STL 容器增加预设元素的初始化方式.
+
+这个故事还要从 C 的一个语法点说起. 在 C 语言中, 如下的代码
+
+```
+struct Point {
+    int x;
+    int y;
+};
+
+Point p = {0, 1};
+int a[] = {0, 1};
+```
+
+同样的 `{0, 1}` 在编译器看来语义是截然不同的, 对 `p` 而言是初始化其成员, 对 `a` 而言则既要推导 `a` 的大小又要设定其元素的值.
+
+而在 C++03 中, 如果为 `Point` 定义一个构造函数, 以下写法就不正确了
+
+```+
+struct Point {
+    int x;
+    int y;
+
+    Point(int x_, int y_): x(x_), y(y_) {}
+};
+
+Point p = {0, 1}; // 错误: 非 POD 的类型^[[一个类是 POD 的条件是 a) 非继承 b) 没有用户定义的构造或析构函数或赋值算符重载 c) 没有虚函数 d) 成员均为 `public` 访问限制 e) 所有的成员亦均为 POD]]不能用初始化列表构造
+```
+
+不过, 只要用 C++11 的编译器, 上述代码中的编译错误就立即消失了. 实际上, C++11 中添加以上语法作为一则初始化语法, 或者说调用构造函数的语法. 如
+
+```
+Point p = {0, 1};   // 与初始化 POD 的语法相同
+Point q{0, 1};      // 亦可省去等号
+
+// 这两种写法均等价于传统写法
+Point r(0, 1);
+```
+
+也就是说, 针对构造函数, 可以使用花括号替代圆括号. 这一特性还有助于减少调用无参构造函数时的书写错误. 例如
+
+```
+struct Point {
+    // ...
+    Point() : x(0), y(0) {}
+};
+
+Point p();
+```
+
+上例中定义 `p` 的实际上并不是调用无参构造函数初始化一个 `Point` 对象, 实际上它是一个函数前置声明, 该函数没有参数并返回 `Point`. 这一新人杀手级语言 "特性" 导致的错误通常在修改代码时, 去掉了构造参数都但没有去掉括号而产生. 而在新语法中, 它可以这样写
+
+```
+Point p{};
+```
+
+另外, 用户可以利用这一语法特性简化一些 `return` 语句. 当函数需要返回以特定构造函数构造的对象时, 可以使用花括号语法, 而不必写出类名. 如
+
+```
+std::string make_string()
+{
+    return {};
+    // 而不需要写
+    // return std::string();
+}
+
+Point make_point(int x, int y)
+{
+    return {x, y};
+    // 而不需要写
+    // return Point{x, y};
+}
+```
+
+除了以上单个对象的构造语法有所更改, 批量构造对象的语法语义也变得不同. 类似 `int a[] = {0, 1};` 这一例子中, 数组初始化时给出的花括号括起的整数值序列, 它不仅仅可以用于构造数组, 现在也可以用于构造容器了. 比如
+
+```
+std::vector<int> x = {0, 1};
+// 当然, 也可以去掉等号
+std::vector<int> y{2, 3, 5, 7};
+
+for (int i: x) {
+    std::cout << "x contains " << i << std::endl;
+}
+/* 输出
+x contains 0
+x contains 1
+*/
+
+for (int i: y) {
+    std::cout << "y contains " << i << std::endl;
+}
+/* 输出
+y contains 2
+y contains 3
+y contains 5
+y contains 7
+*/
+```
+
+如果编译时知道一个容器里该有些什么东西, 直接写到构造函数里, 比先定义出容器再一个个添加要简单多了.
+
+这一语法看起来很奇特, 不过并不神秘, 也不仅仅被 STL 容器所用 (不仅 `vector`, 其他所有的 STL 容器都支持这样构造). 在 C++11 中, 编译器处理到花括号扩起的类型相同的表达式时, 就会试图将其转换为称作 `std::initializer_list` 的泛型类的实例, 而 STL 容器之所以可以这样构造, 无非是因为它们都有参数 `initializer_list<value_type>` 的构造函数. 当然, 不仅构造函数可将初始化列表当作参数, 一般函数也可以, 如
+
+```
+#include <iostream>
+#include <initializer_list>
+
+// 以 initializer_list 为参数的函数, 这是一个泛型类型, 需要特化
+void f(std::initializer_list<int> x)
+{
+    // initializer_list 实例的 size() begin() end() 函数使它可以表现得像一个标准容器
+    std::cout << "initializer_list size=" << x.size() << std::endl;
+    for (int i: x) {
+        std::cout << "-- element " << i << std::endl;
+    }
+}
+
+int main()
+{
+    f({1, 1, 2, 3});
+    /* 输出
+
+    initializer_list size=4
+    -- element 1
+    -- element 1
+    -- element 2
+    -- element 3
+
+    */
+
+    f({});
+    /* 输出
+
+    initializer_list size=0
+
+    */
+    return 0;
+}
+```
+
+而像 `std::map` 这样, 元素类型不是一个单一的值而是键值对, 在初始化的时候就需要混合使用初始化列表和之前介绍的用花括号括起构造参数的做法
+
+```!
+std::pair<std::string, int> jan{"jan", 1};
+std::map<std::string, int> x{ // map<std::string, int> 中的值类型是 pair<std::string const, int>
+
+    jan,                      // 可以使用一个 pair 实例来复制构造
+
+    {"feb", 2},               // 也可以使用花括号括起的两个值调用构造函数
+    {"mar", 3},
+};
+std::cout << x["feb"] << std::endl; // 2
+```
+
+不过这样看起来, 花括号的作用又非常混乱了. 即, 如果花括号中各个元素的类型一致, 那么它被编译器视作一个初始化列表实例; 否则编译器将根据花括号中各表达式的类型, 尝试决议出一个构造函数重载进行调用.
+
+然而, 假如像上面 `Point` 类那样, 其构造函数的参数类型恰好都是相同的, 构造参数看起来像个初始化列表, 编译器不会很困惑吗?
+
+确实初始化列表的语法仍有歧义. 在这种情况下, 用初始化列表语法去调用函数时, 将优先匹配以 `initializer_list` 为参数的重载, 若不存在此重载才会以其他重载作为备选. 比如下面的例子
+
+```
+void f(std::initializer_list<int> x) // (a)
+{
+    std::cout << "initializer_list" << std::endl;
+}
+
+void f(Point p)                      // (b)
+{
+    std::cout << "point" << std::endl;
+}
+
+int main()
+{
+    f({0, 0});                       // 输出: initializer_list
+    return 0;
+}
+```
+
+例子中定义了两个重载, 重载决议会判定为调用 (a), 而将 (a) 删除掉的话, 则重载 (b) 会被执行.
+
+= 委托构造函数
+
+当为一个成员很多的类型编写一组构造函数重载时, 需要给每个构造函数都写上长长的初始化列表. 如
+
+```
+struct Person {
+    std::string first_name;
+    std::string last_name;
+    std::string address;
+    int score;
+    int age;
+
+    // 显式初始化每个成员的完整初始化
+    Person(std::string const& fname, std::string lname, std::string const& addr,
+           int s, int a)
+        : first_name(fname)
+        , last_name(lname)
+        , address(addr)
+        , score(s)
+        , age(a)
+    {}
+
+    // 只为部分成员执行默认初始化
+    // 传统的做法仍然需要将一些原生成员放到初始化列表中
+    Person(std::string const& fname, std::string lname, int a)
+        : first_name(fname)
+        , last_name(lname)
+                            // address 作为 string 类型成员, 有构造函数保证其正确初始化, 不必写入初始化列表
+        , score(0)          // 但整数或指针等原生类型需要显式初始化
+        , age(a)
+    {}
+};
+```
+
+这种写法一方面初始化列表的代码显得臃肿不堪, 另一方面维护难度也很大, 如果新增原生类型成员, 每个构造函数的初始化列表里都需要加上对其的初始化.
+
+在 C++11 中新增了一种初始化列表的书写方式, 即允许一个构造函数调用另一个构造函数作为初始化对象的手段, 如以上代码中的第二个构造函数重载可以调用第一个重载. 如
+
+```
+struct Person {
+    // ...
+
+    Person(std::string const& fname, std::string lname, std::string const& addr,
+           int s, int a)
+        : first_name(fname)
+        , last_name(lname)
+        , address(addr)
+        , score(s)
+        , age(a)
+    {}
+
+    // 使用委托构造函数的做法是, 将另一构造函数的调用作为唯一成分写在初始化列表中
+    // 这个例子中, 上一个构造函数重载中初始化了所有成员
+    // 其他构造函数都可调用上一构造函数重载, 不用担心漏掉个别成员的初始化
+    Person(std::string const& fname, std::string lname, int a)
+        : Person(fname, lname, "", 0, a)
+    {}
+};
+```
+
+需要注意的是, C++ 构造函数对成员初始化的要求是不重不漏, 当委托另一构造函数进行构造后, 隐含着 "所有成员都已被正确初始化" 这一结果, 因此不能继续在初始化列表中加任何成分, 或者委托调用其他的构造函数. 例如下面是一些可能误用的情况
+
+```
+struct Person {
+    // ...
+    Person(std::string const& fname, std::string lname, int a)
+        : Person(fname, lname, "", 0, a)
+        , age(0) // 错误: 不能再初始化其他成员了
+    {}
+};
+
+struct Base { int x; Base(int x_): x(x_) {} };
+
+struct Inherit : Base {
+    int y;
+
+    // 正确: 先调用父类构造函数初始化父类的部分, 再初始化本身的成员
+    Inherit(int x_, int y_): Base(x_), y(y_) {}
+    // 正确: 委托构造
+    Inherit(int x_): Inherit(x_, 0) {}
+
+    Inherit(int x_)
+        : Base(x_)
+        , Inherit(x_, 0) // 错误, 对父类初始化后, 不能再使用委托构造
+    {}
+};
+```
+
+= 成员缺省初始化
+
+另一可以简化构造函数代码的特性则是为那些无论如何都需要初始化, 并且有固定初始化模式的成员设置缺省的初始化方式. 比如
+
+```
+std::string current_date();
+
+class Logger {
+    // 为这个 ofstream 类型成员设定缺省的初始化方式
+    std::ofstream output{"logs/log-" + current_date() + ".log"};
+
+    int id;
+    std::string format;
+public:
+    Logger(int id)                              // (a)
+        : id(id)
+    {}
+
+    Logger(int id, std::string const& fmt);     // (b)
+        : id(id)
+        , format(fmt)
+    {}
+
+    Logger(std::string const& filename, int id) // (c)
+        : output(filename, std::ios_base::app);
+        , id(id)
+    {}
+};
+```
+
+在上例中有三个构造函数重载, 其中 (a) 和 (b) 都没有显式初始化 `output` 成员, 但是 `output` 成员其默认构造函数又不能产生一个可以正常工作的文件流对象, 于是就需要给出一个缺省的初始化方式, 这种初始化就是将构造参数直接写在成员声明处. 如果像 (c) 重载那样指定了 `output` 的初始化方法, 那么指定的缺省初始化就不会被执行.
+
+从例子中还可以看出, 虽然成员初始化参数的模式只能设定一种, 但并不妨碍从这种模式中得出不同的实参, 如果 `current_date()` 这个函数能返回不一样的值, 那么构造不同 `Logger` 实例时其 `output` 指定的文件名仍可以是不同的.
+
+以上写法中不能将初始化的花括号改成圆括号, 否则语法上会被编译器识别为成员函数定义.
+
+```
+struct A {
+    int m(0); // 错误: 这会被编译器认为是定义函数
+    int n{0}; // 正确: 使用花括号括起参数
+    int p{};  // 正确: 使用花括号, 无初始化参数, int 被置为 0
+};
+```
+
+可以复制构造的成员亦可用等号设定初始值^[[使用等号的语法会让编译器认为是复制构造, 但编译器通常会优化掉. 恰好例子中的流对象是不可复制构造的, 因此只有上面这种写法.]]. 如下面例子中的写法也都是正确的.
+
+```
+struct A {
+    int m = 0;                           // 直接使用等号加上初始值
+    std::string s = "1";                 // 相当于 = std::string("1")
+    std::string t = std::string(3, '2'); // 显式写作复制构造形式
+};
+```

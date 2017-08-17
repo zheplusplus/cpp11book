@@ -1,0 +1,193 @@
+首先, C++11 中加入了针对临时对象和字面量**右值引用** (rvalue reference) 类型, 这种类型是专门针对临时对象和字面常量的. 如果为一族函数加上以右值引用为参数的版本, 那么使用临时对象作为实参时, 优先决议出的就是这一重载. 如
+
+```
+void test_ref(int& m) { std::cout << "non-const " << m << std::endl; }
+void test_ref(int const& m) { std::cout << "const " << m << std::endl; }
+
+// 增加参数为右值引用的重载
+// int 的右值引用类型的写法为 int&&
+void test_ref(int&& m)
+{
+    std::cout << "rvalue " << m << std::endl;
+}
+
+int zero() { return 0; }
+
+int main()
+{
+    int a = 0;
+    int const b = 1;
+    test_ref(a);      // non-const 0
+    test_ref(b);      // const 1  : 这两句输出仍然不变
+
+    test_ref(zero()); // rvalue 0 : 临时对象匹配右值引用重载
+    test_ref(1);      // rvalue 1 : 字面常量也匹配右值引用重载
+    return 0;
+}
+```
+
+这一类型语法上写为类型名之后加上 `&&` 符号, 如 `int&&` 就是 `int` 类型的右值引用, `std::string&&` 是 `std::string` 的右值引用类型, 等等. 不得不说, 这个符号跟逻辑与运算的操作符完全一样, 不免有时会引起歧义, 就像引用符号 `&` 也是按位与运算符一样. 在编码时, 如果用到双目运算符而非声明引用, 也应当在其前后加上空格 (就像在自定义字面量中所提到的应注意的情况一样). 而在后文叙述中, 本书将尽量以 "右值引用符号" 指代表示右值引用的 `&&` 符号.
+
+另外, 右值引用这一命名的由来是相对于左值引用, 听起来略带一些调侃. 之前已经提到, C++ 的一些特性使得 "左值" "右值" 这些概念实际上没有与等号有左右方向上的对应关系, 仅仅是一个名字而已. 如果可以的话, 读者更应该将其理解成对临时对象的引用.
+
+右值引用除了可以区别于 `const` 限定引用, 在非成员函数的调用时影响重载决议之外, 还有一个好处是, 允许修改其绑定的临时对象. 这一点其实与从临时对象上调用成员函数, 决议出其非 `const` 限定的重载一样. 或者反过来说, 本来临时对象就应当是可修改的, 在决议非成员函数调用时强制其匹配 `const` 引用并不那么合适. 而且允许修改临时对象, 有时还能提高程序性能, 如
+
+```
+#include <vector>
+#include <algorithm>
+#include <iostream>
+
+std::vector<int> make_vector()
+{
+    std::vector<int> x{2, 1, 5};
+    return x;
+}
+
+void output_sorted(std::vector<int> const& v)
+{
+    std::cout << "use const ref" << std::endl;
+
+    // std::sort(v.begin(), v.end()); // 编译错误: v 是 const 限定的
+
+    // 如果临时对象匹配 const 引用, 那么不能在容器上排序, 必须复制一份
+    std::vector<int> u(v);
+    std::sort(u.begin(), u.end());
+    for (auto x: u) {
+        std::cout << x << std::endl;
+    }
+}
+
+void output_sorted(std::vector<int>&& v)
+{
+    std::cout << "use rvalue" << std::endl;
+
+    // 而右值引用允许修改引用对象, 故可以直接排序
+    std::sort(v.begin(), v.end());
+    for (auto x: v) {
+        std::cout << x << std::endl;
+    }
+}
+
+int main()
+{
+    output_sorted(make_vector());
+    return 0;
+}
+
+/* 输出
+
+use rvalue
+1
+2
+5
+
+*/
+```
+
+而将字面常量绑定到右值引用, 也可以修改, 似乎有些无法说通. 这时可以将字面常量考虑为由一个函数返回的临时值, 就不那么难以理解了. 即
+
+```
+int&& i = 0;      // 直接把字面常量绑定到右值引用上?
+int&& j = int(0); // 实际上等价于这种写法, 看起来构造函数产生的临时对象
+```
+
+以上临时对象和字面常量是两种典型的右值, 其它可能是右值的情况也都在下面这个例子中
+
+```
+void test_ref(int& m) { std::cout << "non-const " << m << std::endl; }
+void test_ref(int const& m) { std::cout << "const " << m << std::endl; }
+void test_ref(int&& m)  { std::cout << "rvalue " << m << std::endl; }
+
+struct Point {
+    int x;
+    int y;
+
+    Point(int x_, int y_): x(x_), y(y_) {}
+};
+
+int four()
+{
+    return 4;
+}
+
+int main()
+{
+    int x = 1, y = 2;
+
+    test_ref(2);                         // rvalue 2 : 字面常数
+    test_ref(x + y);                     // rvalue 3 : 原生类型运算
+    test_ref(four());                    // rvalue 4 : 函数调用返回的值
+    test_ref(Point(5, 6).x);             // rvalue 5 : 临时对象的某个属性
+
+    int six = 6; int const seven = 7;
+    // 显式转换非 const 左值引用为右值引用
+    test_ref(static_cast<int&&>(six)); // rvalue 6
+    // 但无法应用于 const 引用, 即 static_cast<int&&>(seven) 无法编译
+
+    // 虽然 constexpr 常量在编译之后会被编译器优化为字面常量
+    // 并且它本身还可以作为数组长度定义或作为模板实参
+    // 但它是 const 限定左值引用
+    constexpr int M = 7;
+    test_ref(M);                         // const 7
+
+    // 而枚举常量则算是字面常量右值
+    enum {N = 8};
+    test_ref(N);                         // rvalue 8
+    return 0;
+}
+```
+
+区分成员函数是否允许从临时对象上调用, 也是右值引用加入之后一项重要的修订工作. 修订工作的首要一项是, 增加一个语法规则使得临时对象无法调用某些成员函数. 它的做法是在对应的成员函数后加上一个左值引用符号, 如
+
+```
+struct IntWrap {
+    int x;
+    explicit IntWrap(int xx) : x(xx) {}
+
+    IntWrap& operator=(int xx) & // 限制无法从右值, 也就是临时对象上调用
+    {
+        this->x = xx;
+        return *this;
+    }
+};
+
+int main()
+{
+    IntWrap(10) = 20;            // 编译错误, 此 operator= 必须从左值上调用
+    return 0;
+}
+```
+
+不过, 如果不加上这个引用符号, 本着最大限度兼容既有代码的规则, 这样的成员函数仍然可以从临时对象上调用.
+
+当然话说回来, 这种代码毕竟也是极少数, 甚至上面那些极端的示例应该不会出现在生产项目中, 因此也不必太过担心这一规则兼容. 如果一定要针对各种不同的引用类型的成员函数重载, 那么应当用如下的方式编写代码
+
+```
+struct MyClass {
+    MyClass() {}
+
+    // 在成员函数之后加上右值引用符号
+    void print() &&     { std::cout << "rvalue" << std::endl; }
+
+    // 为避免歧义, 成员函数如果有针对右值引用的重载, 在定义针对左值的重载时必须加上 & 符号
+    // 对 const 限定的成员函数也一样
+    void print() &      { std::cout << "non const lvalue" << std::endl; }
+    void print() const& { std::cout << "const lvalue" << std::endl; }
+};
+
+int main()
+{
+    MyClass().print(); // 输出 : rvalue
+
+    MyClass a;
+    a.print();         // 输出 : non const lvalue
+
+    MyClass const b;
+    b.print();         // 输出 : const lvalue
+    return 0;
+}
+```
+
+以上就是右值引用和相应的重载决议机制加入后, 对现有体系的修正.
+
+最后有一个小问题需要解释: 临时对象是否应该有 `const` 修饰, 换言之, 针对某个类型 `T` 是否应该有接受 `T const&&` 的重载, 以及是否应该有以 `const&&` 限制的成员函数呢? 答案为否. 通常情况下, 不应该为函数返回的对象还加上 `const` 限定, 因此也就不会实际产生 `T const&&` 类型; 而即使有这样的类型, 由于它带有了不可被修改的限制, 因此使用既有的引用类型 `T const&` 处理之, 效果也会一样.

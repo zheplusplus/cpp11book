@@ -1,0 +1,293 @@
+C 和 C++ 作为静态类型语言, 在写声明语句时需要显式写上即将声明的量的类型. 尤其在 C++ 中, 因为名字空间, 模板以及嵌套类型等特性的广泛使用, 常常会需要书写很长的类型名. 比如以下的代码中
+
+```
+void f(std::vector<int>& x)
+{
+    std::vector<int>::iterator i = x.begin();
+    // ...
+}
+```
+
+最长的成分 `std::vector<int>::iterator` 对程序语义却并无任何影响, 只是起到编译时检查类型之用. 也就是说, 用户既要写 `x.begin()` 的调用, 又要再写这一调用产生的类型, 并用此类型定义 `i` 这个变量, 以达到检查的目的.
+
+在 C++11 中, 这种连篇累牍的写法可以由编译器类型推导替代了. 这包括以下两个新特性:
+
+* 新加入的 `decltype` 关键字可以从一个表达式求得其类型
+* 通过既有标准中几乎已经没有在被使用的 `auto` 关键字, 在定义变量时由初始值推导类型
+
+例如
+
+```
+    std::vector<int> x;
+    std::vector<int>::iterator i = x.begin(); // 显式写出类型名
+
+    decltype(x.begin())        j = x.begin();
+//  ^^^^^^^^^^^^^^^^^^^
+//  decltype(表达式) => 求得此表达式的类型
+
+    auto                       k = x.begin(); // 使用 auto 的写法
+//  ^^^^                       ^   ^
+//  auto 关键字            标识符 初始值
+//  从给定的初始值推导出要定义的变量的类型, 以该初始值进行初始化
+
+//  请注意, 以上写法与 auto 关键字既有的作用不同, 即与以下写法不同
+    auto int m;
+//  这样做是指出 m 使用自动方式 (而非 static) 存储的 int 类型, 初始值待定.
+//  实际上所有栈上定义或函数参数都默认地含有这一修饰, 因此无须显式使用
+```
+
+很明显这两种靠编译器推导类型来定义变量的写法都比直接写上 `std::vector<int>::iterator` 这样的完整类型名要简短得多.
+
+实际上类型推导并不是新鲜事物, 在泛型函数引入时便有了. 如
+
+```
+std::pair<std::string, int> a;
+
+a = std::pair<std::string, int>("C++", 11);
+a = std::make_pair("C++", 11);
+```
+
+这个例子中的两个赋值是等效的, 但是用户往往会选择后一种写法, 这种写法不必再重复写上 `pair` 的参数类型, 而让泛型函数 `make_pair` 来根据参数类型进行推导.
+
+既然有多种推导工具, 它们的规则又是如何呢? 比如对于某一特定的表达式 `expr`
+
+```
+decltype(expr) x = expr;
+auto           y = expr;
+```
+
+以上两句推导定义的 `x` 和 `y` 的类型是否相同呢?
+
+下面先来看看 `auto` 推导定义的规则
+
+```
+                  // 以下类型均指的是定义出的变量的类型
+auto a = 'a';     // 类型为 char
+auto b = 0;       // 类型为 int: 从数值, 字符字面常量推导, 类型与该字面常量类型相同
+
+auto c = "hello"; // 类型为 char const*, 而不是 char const (&)[6]
+int x[8];
+auto d = x;       // 类型为 int*: 从数组推导, 类型改变为指针类型
+
+int y = 0;
+int const z = 1;
+auto d = y;       // 类型为 int
+auto e = z;       // 类型为 int: 从左值 (无论是否含有 const 限定) 推导, 类型为表达式自身类型
+
+auto f = y + 0    // 类型为 int
+int func();
+auto g = func();  // 类型为 int: 从函数调用或运算 (算符重载的情形视作该函数调用)
+                  //             推导为该返回值类型
+
+int& u = y;
+int const& gunc();
+auto h = u;       // 类型为 int
+auto k = gunc();  // 类型为 int: 如果表达式是引用, 则推导时去掉引用和 cv 修饰
+
+auto n = &y;      // 类型为 int*
+```
+
+除了数组会被推导成指针类型之外, 其他自动推导得出的都是值类型本身 (指针也算值类型). 这一行为与既有的泛型函数的模板类型推导是一致的. 如
+
+```-
+template <typename T, typename U>
+void f(T t, U u);        // 推导非引用的参数类型
+
+// ...
+
+int x = 0;
+int const y = 1;
+f(x, y);                 // T 推导为 int 而不是 int& 引用
+                         // U 推导为 int 而不是 int const
+```
+
+由于从非引用表达式无法推导出引用类型, 若需要定义相应的引用, 应该采用 `auto` 加引用符号的方式, 如
+
+```-
+int x = 0;
+int const y = 0;
+
+auto& a = x;       // a 的类型为 int&
+auto& b = y;       // b 的类型为 int const&
+
+auto const& c = x; // c 的类型为 int const& : auto 可以与 const 及引用符号配合使用
+```
+
+此外, `auto` 也可以用于基于范围的循环中. 如
+
+```
+std::vector<std::string> v;
+// ...
+for (auto s: v) {                   // 自动推导 s 为 string 类型, 与上面的一样
+    std::cout << s << std::endl;    // 每个元素复制到 s 中
+}
+
+for (auto& s: v) {                  // 自动推导 s 为 string& 类型
+    s = s + " jumps";               // 因此修改的话会改变元素的内容
+}
+
+for (auto const& s: v) {            // 自动推导 s 为 string const& 类型
+    std::cout << s << std::endl;    // 免去一次复制, 也可以防止修改
+}
+```
+
+使用 `auto` 推导时, 对于编译器而言 `auto` 本身代表了一个类型; 但对于用户而言应该更加关心的是定义得到的变量的类型. 所以应该避免写以下这种难以阅读的代码
+
+```
+int a = 0;
+auto x = 0, *y = &a; // 推导时, auto 代表 int, 因此 x 是 int 类型而 y 是 int* 类型
+                     // 不建议在一个 auto 定义语句中定义两个变量
+```
+
+以上是 `auto` 关键字在 C++11 焕发新生后的一个主要作用, 自动类型推导定义. 此外, 它还有一个作用, 就是令函数返回值类型后置. 如
+
+```
+auto func() -> int
+{
+    return 0;
+}
+```
+
+在本应该写返回值类型的位置上用 `auto` 替代之, 然后在参数列表之后加上一个箭头符号 `->`, 最后再写上返回值. 在上面例子里这种写法看起来并没有什么用, 但有些时候是必需的.
+
+考虑设计这样一个 API: 给定一个函数或函数对象 `F`, 和参数 `vector<T>`, 将 `F` 应用于此容器内每一个元素得出一个类型为 `U` 的结果, 然后将这些结果依次放入类型为 `vector<U>` 的容器中返回. 那么这个 API 的签名应该怎么写呢? 即, 下面这段代码中的问号应该填入什么类型?
+
+```
+template <typename T, typename F>
+std::vector< ??? > mapping_vector(std::vector<T> const& v, F f);
+```
+
+如果再加一个泛型参数 `U`, 让用户调用时手动指定, 虽然可行, 但是对用户而言是个负担. 这时 `auto` 与 `decltype` 搭配出场就能很优雅地解决这个问题. 用法如下
+
+```
+    template <typename T, typename F>
+    auto mapping_vector(std::vector<T> const& v, F f)
+                            -> std::vector<decltype(f(v[0]))>;
+//  ^^^^                                   ^^^^^^^^^^^^^^^^^
+```
+
+`decltype` 中的表达式 `f(v[0])` 不会在运行时求值, 所以不用担心如果参数 `v` 内没有元素的情况. `decltype(f(v[0]))` 取得 `f(v[0])` 函数调用的返回值类型, 然后用它来特化 `vector`, 就得到了所需的 API 返回值类型.
+
+但是这个返回值类型必须后置, 因为编译器在还没有解析参数列表前, 并不知道什么是 `f` 和 `v`. 故用 `auto` 在前面当作占位符也是必需的.
+
+若在 `decltype` 时, 上下文中没有可以拿来用的类型实例, 就需要通过一些技巧构造之, 如
+
+```
+template <typename F, typename T, typename U>
+auto f(F f, T t) -> decltype(f(t, U())); // U 是需要用户指定的类型, 参数中不存在
+```
+
+然而这样做在 `U` 类型不存在无参构造函数时无法通过编译, 因此需要其他手段. 另一种典型的做法是使用 `*static_cast<U*>(nullptr)`, 但这样书写相当不便. 考虑到这样的需求, 标准库引入了 `declval<T>()` 泛型函数, 用于构造一个只在编译时上下文中使用的伪对象. 比如以上的需求, 可以实现为
+
+```
+#include <type_traits> // declval
+
+template <typename F, typename T, typename U>
+auto f(F f, T t) -> decltype(f(t, std::declval<U>()));
+//                                ^^^^^^^^^^^^^^^^^
+// 包含了 declval<T>() 的表达式只能用在 decltype, noexcept 等编译时行为中
+```
+
+接下来, 就看看 `decltype` 推导类型时的规则, 尤其是, 基于什么规则为推导出的类型附加或去掉引用.
+
+```
+                        // 以下类型指 decltype 推得的类型
+decltype(0) a;          // int 类型: 字面常量推导出常量本身的类型
+
+int x = 0;
+int const y = 0;
+int& u = x;
+int const& w = x;
+
+decltype(x) b;          // int        : 同 x 的声明类型
+decltype(y) c = 0;      // int const  : 同 y 的声明类型
+decltype(u) d = u;      // int&       : 同 u 的声明类型
+decltype(w) e = w;      // int const& : 同 w 的声明类型
+                        // 由已声明的标识符推导, 类型同该标识符定义的类型
+
+int func();
+int& gunc();
+
+decltype(func()) f;     // int
+decltype(gunc()) g = y; // int&
+                        // 由函数返回值推导, 类型与声明的返回值一致
+
+decltype(x + u) h;      // int  : 基本数据类型的运算推导出相应的基本数据类型
+                        // 有算符重载的情况同函数调用, 以算符重载函数的返回值为准
+
+decltype(*&x) j = x;    // int& : 取得地址后再对指针类型寻址, 得到左值引用类型
+int z[10];
+decltype(z[0]) k = x;   // int& : z[0] 等价于 *(z + 0) 故与上面的情况类似
+```
+
+除了对寻址表达式, 包括数组元素访问推导会得到左值引用类型, 其他情况都会采用标识符的声明类型或函数返回值的声明类型, 不会去掉引用或 cv 修饰, 在这一点上与 `auto` 关键字截然不同.
+
+如果想要利用数组元素推导出非引用类型, 可以使用 C++11 新加入标准库的 `remove_reference` 工具类进行变换
+
+```
+#include <type_traits> // remove_reference
+
+int z[10];
+std::remove_reference<decltype(z[0])>::type m; // m 是 int 类型
+```
+
+另外, 使用声明的类型还意味着, 如果以某个对象成员作为推导来源, 那么 `decltype` 会忽略加之该对象本身的 cv 修饰, 如
+
+```-
+struct A {
+    int x;
+};
+
+void foo(A const& a)
+{
+    int& r = a.x;    // 错误: 因为 a 是 const 修饰的, a.x 实际是 int const 类型
+    decltype(a.x) m; // x 在声明处为 int, 所以 decltype(a.x) 推得的类型是 int
+    m = 0;           // 正确, 可以赋值
+}
+```
+
+`decltype` 还有一个古怪的行为, 就是它会区分标识表达式 (id-expression) 和非标识表达式. 对于单个的标识符, 名字空间下的标识符, 任何表达式对象的成员访问这些标识表达式, `decltype` 推导其类型为各标识符声明的类型, 但若为这些标识表达式加上一层圆括号形成非标识表达式的话, `decltype` 推得的将是相应的引用类型
+
+```
+int x = 0;
+decltype((x)) y = x; // int& 类型
+//       ^ ^            在标识符 x 外面加了一层圆括号形成的 (x) 不是标识表达式
+//                      这时推导出左值引用类型
+
+struct A {
+    int x;
+};
+A a;
+decltype(a.x) m = 0;   // int 类型
+decltype((a.x)) n = m; // int& 类型
+```
+
+但笔者并不建议用带括号的标识符的方式来推导引用, 因为这实在太晦涩, 容易误读. 在需要一个引用类型的情况下, 完全可以显式写上引用符号
+
+```
+int x = 0;
+decltype(x)& a = x;
+//         ^        清晰明了的方式, 在推导的非引用类型外加上 &
+
+// 或先重新定义一个类型, 然后加上引用
+using x_type = decltype(x);
+x_type& a = x;
+```
+
+顺带一提与自动推导有关的一组标准库容器 API 改动. 就像本节最开始的例子中的那样, 使用 `auto` 往往是为了简化过长名字的定义, 容器的迭代器类型自然是较常见的一种情形. 不过, 使用 `begin()`, `end()` 调用一定程度上是有歧义的, 比如迭代器类型都有这两个 `begin()` 重载
+
+```
+iterator       begin();
+const_iterator begin() const;
+```
+
+从非 `const` 限定的容器对象上获取的迭代器都是可修改元素的迭代器, 以此为初始值进行 `auto` 推导定义出的变量也都会如此.
+
+为了允许更便捷地推导出不可修改元素的迭代器, C++11 在所有 STL 容器都扩充了以下 API, 供 `auto` 或 `decltype` 在推导需要时使用.
+
+```
+const_iterator         cbegin()  const; // 迭代初始位置
+const_iterator         cend()    const; // 迭代结束位置
+const_reverse_iterator crbegin() const; // 逆向迭代开始位置
+const_reverse_iterator crend()   const; // 逆向迭代结束位置
+```

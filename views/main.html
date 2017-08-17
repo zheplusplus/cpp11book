@@ -1,0 +1,72 @@
+<html>
+<head>
+<script src='views/run_prettify.js'></script>
+<script src='views/jquery.js'></script>
+<link href='views/prettify.css' rel='stylesheet'>
+<link href='views/main.css' rel='stylesheet'>
+<meta charset='utf-8'>
+</head>
+<body>
+<div id='top-menu'>
+  <label class='menu'>
+    <input type='checkbox'>
+    <span>关于</span>
+    <ul>
+      <li>这是一本开放的电子书, 欢迎阅读</li>
+      <li>作者: 林喆 / <a href='https://github.com/neuront/cpp11book'>Github 地址</a></li>
+      <li><a rel="license" href="http://creativecommons.org/licenses/by-nc-nd/4.0/"><img alt="知识共享许可协议" style="border-width:0" src="https://i.creativecommons.org/l/by-nc-nd/4.0/80x15.png" /></a><br />本作品采用<a rel="license" href="http://creativecommons.org/licenses/by-nc-nd/4.0/">知识共享署名-非商业性使用-禁止演绎 4.0 国际许可协议</a>进行许可</li>
+    </ul>
+  </label>
+</div>
+<hr style='clear: both; position: relative'>
+<script>
+-function() {
+  var cb = $('.menu input[type="checkbox"]');
+  cb.each(function(i, e) {
+    e.onchange = function() {
+      clearSelection(i);
+    };
+  });
+  function clearSelection(i) {
+    cb.each(function(j, e) {
+      if (i !== j) {
+        e.checked = false;
+      }
+    });
+  }
+  $('body').click(function(e) {
+    clearSelection(-1);
+  });
+  $('#top-menu').click(function(e) {
+    e.stopPropagation();
+  });
+}();
+</script>
+
+<h1 style='font-size: 3em; text-align: center'>C++11 - 有什么以及为什么</h1>
+<hr>
+<h1>目录</h1>
+{%- for t in toc %}
+    {{ t }}
+{% endfor %}
+<hr>
+<div id='body'>
+{%- for p in body %}
+    {{ p }}
+{% endfor %}
+</div>
+<hr>
+{%- for p in footnotes %}
+    {{ p }}
+{% endfor %}
+<script>
+$(document).ready(function() {
+    var convert = {'int': true, size_t: true};
+
+    $('.typ').each(function(i, e) {
+        if (convert[$(e).text()] === true) {
+            $(e).addClass('kwd').removeClass('typ');
+        }
+    });
+})
+</script>

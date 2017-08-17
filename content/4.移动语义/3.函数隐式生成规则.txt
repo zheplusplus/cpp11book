@@ -1,0 +1,207 @@
+C++ 有一些规则会隐式地为用户生成复制构造函数, 复制赋值算符重载或析构函数, 在引入移动语义之后, 这些隐式生成还扩展到了移动构造函数与移动赋值算符重载. 本节中就来对 C++ 标准中这些部分加以说明.
+
+在 C++11 标准之前, 有个 "三法则" (the rule of three) 约定, 指的是以下三个函数
+
+* 析构函数
+* 复制构造函数
+* 赋值算符重载
+
+需要被定义, 如果用户没有定义它们, 则编译器会隐式生成它们. 如
+
+```
+struct AllImplicit {
+    int x;
+    int y;
+
+    AllImplicit(int xx, int yy)
+        : x(xx)
+        , y(yy)
+    {}
+};
+
+int main()
+{
+    AllImplicit a(10, 20);
+    AllImplicit b(a);      // 调用隐式生成的复制构造函数
+    AllImplicit c(0, 0);
+    c = a;                 // 调用隐式生成的赋值算符重载
+
+    std::cout << a.x << ',' << a.y << std::endl;
+    std::cout << b.x << ',' << b.y << std::endl;
+    std::cout << c.x << ',' << c.y << std::endl;
+
+    return 0;
+    // 调用隐式生成的析构函数
+}
+```
+
+而隐式生成的复制构造函数, 复制算符重载和析构函数则是
+
+```
+struct AllImplicit {
+    AllImplicit(AllImplicit const& rhs)
+        : x(rhs.x)
+        , y(rhs.y)
+    {}
+
+    AllImplicit& operator=(AllImplicit const& rhs)
+    {
+        this.x = rhs.x;
+        this.y = rhs.y;
+    }
+
+    ~AllImplicit() {}
+};
+```
+
+编译器这么做的规则是调用其每个成员的复制构造函数对其进行初始化; 赋值算符重载类似, 为每个成员进行一次赋值; 析构函数则什么都不做. 对于以上这个例子而言, 默认的复制构造函数, 析构函数等已经足够了, 因为它并不包含任何**资源**的管理. 这也是编译器执行隐式函数生成的根据. 而这也正是在介绍 `constexpr` 时提到过的字面类型, 这些类型跟 `int`, `double` 等一样, 在 C++ 中被视为纯粹的基本数据类型, 不必在复制或析构时有特别的关照.
+
+而以下这个例子, 就需要引入用户自定义的这一组函数
+
+```
+class Buffer {
+    typedef unsigned char byte;
+
+    // _buffer 指针指向的是一块堆内存区
+    byte* _buffer;
+    // 以及这块堆内存区分配的大小
+    std::size_t _size;
+public:
+    // 复制的时候, 不只复制指针的值, 而要根据被复制对象的资源信息
+    // 另外分配一份相同大小的内存区, 并拷贝数据
+    Buffer(Buffer const& rhs)
+        : _buffer(rhs._size != 0 ? new byte[rhs._size] : nullptr)
+        , _size(rhs._size)
+    {
+        std::copy(rhs._buffer, rhs._buffer + rhs._size, this->_buffer);
+    }
+
+    // C++ 隐式函数生成规则的逻辑在此体现为, 如果有以上定义的复制构造函数
+    // 那么 operator= 可以用隐式生成的吗? 显然答案为否. 用户必须自己定义赋值行为
+    Buffer& operator=(Buffer const& rhs)
+    {
+        if (this != &rhs) {
+            Buffer tmp(rhs);
+            this->swap(tmp);
+        }
+        return *this;
+    }
+
+    // C++ 隐式函数生成规则的逻辑在此体现为, 如果有以上定义的复制构造函数
+    // 那么析构函数可以用隐式生成的吗? 显然答案亦为否. 用户必须自己定义析构行为
+    ~Buffer()
+    {
+        delete[] this->_buffer;
+    }
+
+    void swap(Buffer& rhs);
+};
+```
+
+以上的例子可以看出, 如果用户定义了这三个函数中的一个, 也**应当**定义另外两个, 这是由于在 C++ 的语义上, 自定义其中任何一个函数是有资源管理的情形.
+
+是否需要编写相应的控制函数也显示出来 C++ 的类应当区分为两种: 基本数据对象类型和资源控制对象类型. 基本数据对象持有的都是可以平凡复制的基本数据, 不需要非平凡的复制或析构行为; 而资源控制对象型则需要用户定义更细致地复制和析构行为.
+
+在 C++11 标准中, 这一约定被更换成了 "五法则" (the rule of five), 多出来的两个是移动构造函数和移动赋值算符重载. 对于新的这些函数的实现要领, 在 STL 源码中已经见识过了这里就不再举例赘述. 只是对它们而言情况稍有不同, 新的约定是
+
+* 如果用户没有定义以上任何一个函数, 则隐式生成所有这五个函数; 隐式生成移动构造函数或移动赋值算符重载函数的规则是逐个移动构造或移动赋值对象的每个对应基类部分和每个对应成员部分
+* 除非, 有基类或某成员将其中某个函数标记为 `delete`, 那么对应的函数不会隐式生成
+* 若三法则中任何一个函数被用户定义, 则移动构造函数和移动赋值算符重载不会隐式生成
+
+例如
+
+```
+struct Person {
+    std::string name;
+    int age;
+
+    // 由于三法则中任何一个函数都没有定义
+    // 编译器隐式生成五法则中所有函数
+
+    // 其中隐式生成的移动构造函数将类似于
+
+    /*
+
+    Person(Person&& x)
+        : name(std::move(x.name)) // 移动构造 string 类型的 name 属性
+        , age(std::move(x.age))   // int 类型的移动实际跟复制行为一样
+    {}
+
+    */
+
+    // 这种隐式生成, 一般而言都应该是语义正确的
+};
+
+struct PointerHolder {
+    // 作为成员的 unique_ptr 的复制构造, 复制赋值算符都被标记为 delete
+    // 因此这个类也不会生成这两个函数
+    std::unique_ptr<int> p;
+
+    PointerHolder()
+        : p(nullptr)
+    {}
+
+    // 如果不注释这一句, 那么移动构造函数和移动赋值算符重载都不会隐式生成
+    // 下面使用处会报错
+    // ~PointerHolder() {}
+};
+
+int main()
+{
+    Person p;
+    p.name = "xiaoming";
+    p.age = 10;
+
+    Person q(std::move(p)); // 调用隐式生成的移动构造函数
+    std::cout << p.name.empty() << std::endl; // 1 : p 作为移动来源, 其 name 属性管理的资源移交给了 q.name
+    std::cout << p.age << std::endl;          // 10 : 移动之后基本数据类型的值还会保留
+
+    std::cout << q.name << std::endl;         // xiaoming
+    std::cout << q.age << std::endl;          // 10
+
+    // ====================
+
+    PointerHolder x;
+    x.p = std::unique_ptr<int>(new int(40));
+
+    // 调用隐式生成的移动构造函数
+    PointerHolder y(std::move(x));
+    std::cout << (x.p == nullptr) << std::endl; // 1
+    std::cout << *y.p << std::endl;             // 40
+
+    // 调用隐式生成的移动赋值算符
+    PointerHolder z;
+    z = std::move(y);
+    std::cout << (y.p == nullptr) << std::endl; // 1
+    std::cout << *z.p << std::endl;             // 40
+
+    return 0;
+    // 调用隐式生成的析构函数
+}
+```
+
+上面最后一条规则向前兼容的防范, 现有代码中某个管理资源的类型立即使用支持 C++11 编译器编译时, 由于没有隐式生成移动相关函数, 从右值构造或赋值时还是会决议到复制构造函数或复制赋值算符重载. 因此在更新了编译器之后, 这些类型也要更新代码才能获得移动语义带来的优化.
+
+五法则的着眼点在类型是否手动管理资源. 而在另一个领域里有一个小例外, 就是不包含资源, 但需要多态行为的基类在定义时, 用户必须定义一个虚析构函数, 但并没有必要定义复制或移动的相关函数. 这时如果用户去一个个手写这些函数就太麻烦了, 尤其是移动相关的函数, 它们并不会被隐式生成. 为了解决这个问题, C++11 又引入了用于生成默认行为的构造函数, 赋值运算符的机制. 如
+
+```
+struct BaseClass {
+    // 空函数体的析构函数, 只是为了加上 virtual 修饰
+    virtual ~BaseClass() {}
+
+    // 复制相关函数
+    // 在函数签名后使用 = default 来生成默认行为
+    // 与 = delete 不同, 它只可以被用在这些能被隐式生成的函数之后
+    BaseClass(BaseClass const&) = default;
+    BaseClass& operator=(BaseClass const&) = default;
+
+    // 移动相关函数
+    BaseClass(BaseClass&&) = default;
+    BaseClass& operator=(BaseClass&&) = default;
+
+    // 无参数的构造函数也适用 = default; 在本例中这不是必需的
+    BaseClass() = default;
+};
+```
+
+使用 `= default` 生成默认行为的函数, 只能用于无参构造函数和五法则约定中的函数, 且析构函数不能是虚函数 (因此上例中析构函数不能使用 `= default`). 在函数签名后, 不能写初始化列表或函数体, 而必须直接加上 `= default;` 声明. 而若类不需要其中的某些函数, 也最好使用 `= delete` 显式将其标记为不可用.

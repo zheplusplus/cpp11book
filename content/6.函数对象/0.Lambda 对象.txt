@@ -1,0 +1,314 @@
+= 捕获上下文的 Lambda 语法形式
+
+第一章中说明了如何使用 lambda 匿名函数结合 `find_if` 来寻找容器的一个特定属性小于某个常数的元素. 若对这个需求稍作修改, 要寻找容器中比指定的参数要小的元素, lambda 还能简洁地实现吗?
+
+```
+// 例如, 给定容器 x 和参数 n, 寻找容器中一个比 n 小的值
+void print_less_than(std::vector<int> const& x, int n)
+{
+    auto r = std::find_if(
+        x.begin(), x.end(),
+        [](int i)
+        {
+            return i < n; // 编译错误: n 不能在直接 lambda 函数体内使用
+        }
+    );
+    if (r != x.end()) {
+        // ...
+    }
+}
+```
+
+普通 lambda 函数不能直接使用其上下文中所定义的局部变量或参数, 如果需要在 lambda 函数体中引用上下文中的名字, 就需要显式地 "捕获" 之. 带有捕获的 lambda 语法如下
+
+```
+#include <iostream>
+#include <vector>
+#include <algorithm>
+
+void print_less_than(std::vector<int> const& x, int n)
+{
+    auto r = std::find_if(
+        x.begin(), x.end(),
+        [=](int i)        // 语法形式有变化, 开头的方括号中多了一个等号
+        {
+            return i < n; // 在函数体中使用的 n 为外层函数的参数
+        }
+    );
+    if (r != x.end()) {
+        std::cout << *r << std::endl;
+    } else {
+        std::cout << "no such element" << std::endl;
+    }
+}
+
+int main()
+{
+    std::vector<int> x{8, 4, 2, 1};
+    print_less_than(x, 3); // 输出 2
+
+    std::sort(x.begin(), x.end());
+    print_less_than(x, 3); // 输出 1 : 排序后 1 到了首位最先被找到
+
+    print_less_than(x, 1); // 输出 no such element
+    return 0;
+}
+```
+
+由于策略函数含有一个参数 `n`, 它不再能被定义为静态函数了. 这种需求在 C++ 中通常以带有成员的函数对象来实现, 而在 C++11 中亦可用上述 lambda 语法实现.
+
+而与第一章中提到的基本 lambda 语法不同的是, 此处 lambda 开头的方括号中间多了一个等号, 写为 `[=]` 形式, 这被称作 lambda 的**捕获列表** (capture list), 它表示此 lambda 对象以何种方式处理它所引用的定义在上下文中的对象.
+
+在这个例子中的 `[=]` 表示以复制的方式进行捕获, 捕获的对象包括上文中定义的 `int n`, 因为只有它被这个 lambda 对象的函数体所使用了. 如果需要以引用的方式捕获上下文中的对象, 则应该使用 `[&]`; 而如果需要更精细的控制, 则需要使用类似如下的语法 `[n, &m]` 标识以复制的方式捕获 `n` (这时不能有等号) 并以引用的方式捕获 `m`. 如
+
+```
+int main()
+{
+    // 两个整数的初始值均为 0
+    int n = 0, m = 0;
+    auto fn = [n, &m]()
+    {
+        std::cout << "n=" << n << ", m=" << m << std::endl;
+    };
+    // 然后改变 n 和 m 的值
+    n = 1;
+    m = 2;
+
+    // 由于 n 是复制捕获, 其改变不会反映到 lambda
+    // 相应地, 以引用方式捕获的 m 的改变则会影响到 lambda 的行为
+    fn();
+    // 输出
+    // n=0, m=2
+
+    int k = 0;
+    // 如下的代码, 捕获上下文中中定义的引用
+    int& r = k;
+    auto gn = [r]() // 虽然 r 本身是引用, 但捕获时没有以引用方式捕获, 则等价于以复制方式捕获
+    {
+        std::cout << "r=" << r << std::endl;
+    };
+    r = 3; // 此处修改 r 对 lambda 对象无影响
+    gn();  // 输出: r=0
+    return 0;
+}
+```
+
+捕获上下文内容的 lambda 语法特性实际上只是一个语法糖, 等价于编译器在该 lambda 的上下文中生成了一个匿名类型的对象, 并且它实现了 `operator()` 算符重载, 该重载的参数列表与 lambda 一致, 返回值类型默认由 `return` 语句中返回的表达式类型推导; 而这个对象的成员便是捕获列表中声明的那些上下文对象, 并且根据以复制方式或引用方式捕获而推导出相应的类型.
+
+比如, 上述 `find_if` 的例子中使用 lambda 的写法等价于以下代码
+
+```
+struct __anonymous_functor__ {
+    int n; // lambda 以复制的方式捕获上下文变量, 等价于在函数对象体存储这个值
+
+    explicit __anonymous_functor__(int n_) : n(n_) {}
+
+    bool operator()(int i) // 返回值类型也是推导出的
+    {
+        return i < this->n;
+    }
+};
+
+auto r = std::find_if(x.begin(), x.end(),
+                __anonymous_functor__(n) // lambda 等价于此函数对象
+);
+```
+
+这也是在没有 lambda 语法支持时会采用的写法. 而使用 lambda 匿名函数对象的好处也是显而易见的: 不再需要为了一个返回值语句的逻辑定义一个冗长的函数对象类型.
+
+因此, 编译器并没有给 lambda 任何特殊的待遇, lambda 在使用上下文中的定义时也必须遵从一般的规则, 包括
+
+* 以复制方式捕获上下文中的变量时, 这些变量必须已经初始化
+* 以引用方式捕获上下文中的内容后, 该 lambda 在被调用时, 被引用的对象生命周期尚未结束
+
+例如, 下面的做法是错误的
+
+```
+#include <iostream>
+#include <memory>
+#include <string>
+
+int main()
+{
+    int n; // 没有初始化的局部变量
+    auto fn = [n]() { std::cout << "n=" << n << std::endl; };
+    n = 0; // n 在 fn 定义之后才初始化
+    fn();  // 不可预料的输出
+
+    std::unique_ptr<std::string> name_ptr(new std::string("Zhangsan"));
+    std::string const& name = *name_ptr;
+
+    auto append_action = [&name](std::string const& action)    // 引用方式捕获了 name
+    {
+        return name + " is going to " + action;
+    };
+
+    std::cout << append_action("use C++11") << std::endl;      // OK: 正常输出
+
+    name_ptr.reset();                                          // 重置 name_ptr, 之后 name 引用的对象生命周期结束
+    std::cout << append_action("revert changes") << std::endl; // 运行时错误: lambda 中捕获的 name 引用已经失效
+    return 0;
+}
+```
+
+C++ 中旧有的关键字 `mutable` 也被卷入了此类 lambda 的语法中. 默认情况下, lambda 对象复制捕获的值都是 `const` 限定的 (引用的 `const` 限定指的是它不能再去引用其他对象, 这一点已是引用自身的特性), 也就是说并不允许修改它们, 或调用这些对象的非 `const` 限定成员函数. 若有这样的需求, 需要在 lambda 参数列表之后加上 `mutable`. 如
+
+```
+std::vector<std::string> ss{"hello", "world"};
+
+// ...
+
+int i = 0;
+std::for_each(ss.begin(), ss.end(),
+              [i](std::string const& s) mutable // 这样才允许修改捕获的 i 变量
+              {
+                  std::cout << ++i << ". " << s << std::endl;
+              });
+std::cout << i << std::endl; // 0
+
+std::for_each(ss.begin(), ss.end(),
+              [&](std::string const& s) // 以引用方式捕获则不需要 mutable, 但外部空间的 i 就被修改了
+              {
+                  std::cout << ++i << ". " << s << std::endl;
+              });
+std::cout << i << std::endl; // 与 ss 的 size() 一致
+```
+
+= 捕获成员函数上下文中的 `this`
+
+当在成员函数上下文使用 lambda 对象时, 可以利用它调用其他成员函数或访问成员变量, 前提条件是捕获列表中要至少声明对 `this` 的捕获.
+
+```
+class Counter {
+    int counter;
+public:
+    Counter()
+        : counter(0)
+    {}
+
+    void print_strings(std::vector<std::string> const& ss)
+    {
+        // 错误: this 没有捕获
+        std::for_each(ss.begin(), ss.end(), [](std::string const& s)
+        {
+            std::cout << ++this->counter << ". " << s << std::endl;
+        });
+
+        // 正确: 显式捕获 this; 捕获之后, 可以使用 private 修饰的成员属性或成员函数
+        // 由于捕获的是 this 指针而不是具体成员, 可以在不附加 mutable 的情况下修改 this 的成员
+        std::for_each(ss.begin(), ss.end(), [this](std::string const& s)
+        {
+            std::cout << ++this->counter << ". " << s << std::endl;
+        });
+
+        // 正确: 捕获了 this 可以不显式使用 "this->" 来访问成员
+        // 建议还是加上 "this->" 提高可读性
+        std::for_each(ss.begin(), ss.end(), [this](std::string const& s)
+        {
+            std::cout << ++counter << ". " << s << std::endl;
+        });
+
+        // 正确: 以复制方式捕获上下文的变量, 此法可以用于捕获 this
+        std::for_each(ss.begin(), ss.end(), [=](std::string const& s)
+        {
+            std::cout << ++this->counter << ". " << s << std::endl;
+        });
+
+        // 正确: 以引用方式捕获上下文的变量, 此法可以用于捕获 this
+        std::for_each(ss.begin(), ss.end(), [&](std::string const& s)
+        {
+            std::cout << ++this->counter << ". " << s << std::endl;
+        });
+    }
+};
+```
+
+= 复制函数对象
+
+从捕获规则可以看出, 因为 lambda 捕获的上下文变量只可能有可复制的值和引用, 所以每个 lambda 对象必然是可复制构造的.^[[在 C++14 中 lambda 新增了别名捕获机制, 可以通过移动构造的方式捕获上下文中的变量, 这时 lambda 可能是不可复制的.]] 要复制一个 lambda 对象并构造一个同样的新 lambda 对象, 可以使用以下的方法
+
+```
+int i = 0;
+auto f = [i](std::string const& s) mutable -> void
+{
+    std::cout << ++i << ". " << s << std::endl;
+};
+auto g = f;        // 仍然使用 auto 自动推导定义
+decltype(f) h = f; // 使用 decltype 推导类型来定义函数对象
+
+// 复制出的 lambda 对象捕获的 i 是独立的
+f("hello"); // 1. hello
+f("world"); // 2. world
+
+g("hello"); // 1. hello
+g("world"); // 2. world
+
+h("hello"); // 1. hello
+h("world"); // 2. world
+```
+
+不过, 通常 lambda 对象并没有必要复制, 但是与 STL 算法函数的配合使用中, 这一行为是难免的, 因为 STL 算法函数的签名中, 函数对象都是以复制传值的方式传入的, 如
+
+```
+int i = 0;
+auto f = [i](std::string const& s) mutable -> void
+{
+    std::cout << ++i << ". " << s << std::endl;
+};
+
+// 第一次使用 f 输出为
+//     1. hello
+//     2. world
+std::for_each(ss.begin(), ss.end(), f);
+
+// 因为 std::for_each 等算法函数会复制函数对象, 第二次使用 f 输出仍然为
+//     1. hello
+//     2. world
+std::for_each(ss.begin(), ss.end(), f);
+
+// 要使得之后输出的编号继续上升, 那么需要将 for_each 的返回值赋值给 f 自身
+f = std::for_each(ss.begin(), ss.end(), f);
+// 再一次使用之, 输出变为
+//     3. hello
+//     4. world
+std::for_each(ss.begin(), ss.end(), f);
+```
+
+= 匿名类型的限制
+
+在上面的代码中定义 lambda 对象都通过 `auto` 和 `decltype` 来推导其类型. 这样做的原因是 lambda 对象的类型均为 "匿名类型", 其确切类型无法直接写成代码, 也就不能直接用来定义实例, 必须借助类型推导.
+
+各个独立定义 lambda 对象的类型也都是不相同的, 即使这些函数对象有完全相同的捕获列表和参数, 甚至完全相同的函数体, 它们也分属于不同类型而不可相互赋值. 如
+
+```
+int n = 0;
+
+auto f = [n](int x) -> bool { return n < x; };
+// 定义 fn_t 为上述 lambda 的类型, 捕获 int n, 以一个 int 为参数, 返回 bool 类型
+using fn_t = decltype(f);
+
+// 以下均无法通过编译, 即使这些 lambda 的捕获列表, 参数, 返回值类型甚至函数体与 f 一致
+// 在编译器的视角看来, 每次定义一个 lambda 对象, 编译器就即时生成一个匿名类型
+// 而所有这些匿名类型都互不相干, 也没有公有基类, 因此无法互相转换
+fn_t g = [n](int x) -> bool { return n > x; };
+fn_t h = [n](int x) -> bool { return n < x; };
+```
+
+因此, 直接对临时 lambda 对象使用 `decltype` 推导类型没有意义, 这样的代码无法通过编译, 如
+
+```
+using fn_t = decltype([n](int x) {}); // 编译错误
+```
+
+因为以上的的各种限制, 在必须直接写出类型之处, 比如类中的成员, 以及函数的返回值, 无法使用 lambda 对象或其类型.
+
+Lambda 也不能在不使用泛型手段的情况下直接定义为成员, 使用泛型手段可以用类似以下的方式定义特殊类型的 `tuple` 等
+
+```
+auto x = std::make_tuple(0, [n](int x) {});
+// x 的类型是 std::tuple<int, __lambda__>
+```
+
+但这样的做法使得 lambda 的匿名性质产生了 "传染性", 即, 特化出的这个 `tuple` 实例的类型仍是无法名状的, 故这个 `tuple` 类型同样也不能被指定为返回值类型或成员类型, 实际使用意义不大.
+
+因此, 如果只是配合算法库函数的使用, 定义随写随用的函数对象, lambda 是很方便的, 不过一旦要作为返回值类型传递就或作为用来声明成员变量, 事情就变得复杂了.
