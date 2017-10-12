@@ -5,7 +5,7 @@ void f() throw(std::runtime_error); // f 可能抛出 std::runtime_error, 不可
 void g() throw();                   // g 不会抛出任何异常
 ```
 
-而 C++11 中新增了关键字 `noexept`, 其功能之一是将上述抛出声明简化为二元形式, 即可能抛出, 或不可能抛出. 其语法形式是在函数签名最后加上 `noexcept(bool 常量)`, 该参数 `bool` 常量表示此函数是否**不**会抛出异常, 这一常量默认为 `true` (但如果根本不写 `noexcept` 的话, 表示该函数可以抛出异常).
+而 C++11 中新增了关键字 `noexcept`, 其功能之一是将上述抛出声明简化为二元形式, 即可能抛出, 或不可能抛出. 其语法形式是在函数签名最后加上 `noexcept(bool 常量)`, 该参数 `bool` 常量表示此函数是否**不**会抛出异常, 这一常量默认为 `true` (但如果根本不写 `noexcept` 的话, 表示该函数可以抛出异常).
 
 ```!
 void f() noexcept(true);     // f 不会抛出异常
